@@ -1,0 +1,175 @@
+
+import { connect } from 'cloudflare:sockets';
+
+const SMTP_CONFIG = {
+    hostname: 'smtp.exmail.qq.com',
+    port: 465,
+    user: 'i@2x.nz',
+    // In a real app, use environment secrets!
+    pass: 'd2pMDZXNmq4mjWyQ'
+};
+
+// Simple helper to send a command and wait for expected response code
+async function sendCommand(
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    command: string | null,
+    expectedCode: number
+): Promise<string> {
+    if (command) {
+        console.log(`[SMTP] Sending: ${command.startsWith('PASS') || command.startsWith('AUTH') ? '***' : command}`);
+        await writer.write(new TextEncoder().encode(command + '\r\n'));
+    } else {
+        console.log(`[SMTP] Waiting for initial greeting...`);
+    }
+
+    let response = '';
+    const decoder = new TextDecoder();
+    
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+            console.error('[SMTP] Connection closed unexpectedly');
+            throw new Error('Connection closed unexpectedly');
+        }
+        
+        const chunk = decoder.decode(value, { stream: true });
+        response += chunk;
+        
+        // Check if we have a full response line
+        if (response.endsWith('\n')) {
+            const lines = response.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            if (lines.length > 0) {
+                const lastLine = lines[lines.length - 1];
+                if (lastLine.match(/^\d{3} /)) {
+                    break;
+                }
+            }
+        }
+    }
+    
+    console.log(`[SMTP] Response: ${response.trim()}`);
+
+    const lastLine = response.trim().split('\n').pop()?.trim();
+    if (!lastLine?.startsWith(String(expectedCode))) {
+        throw new Error(`SMTP Error: Expected ${expectedCode}, got ${response}`);
+    }
+    return response;
+}
+
+// SMTP Send Function
+async function sendViaSMTP(to: string, subject: string, htmlContent: string) {
+    console.log(`[SMTP] Connecting to ${SMTP_CONFIG.hostname}:${SMTP_CONFIG.port}...`);
+    
+    const socket = connect({ 
+        hostname: SMTP_CONFIG.hostname, 
+        port: SMTP_CONFIG.port 
+    }, { 
+        secureTransport: 'on',
+        allowHalfOpen: false
+    });
+
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+
+    try {
+        await sendCommand(writer, reader, null, 220);
+        await sendCommand(writer, reader, 'EHLO forum.2x.nz', 250);
+        await sendCommand(writer, reader, 'AUTH LOGIN', 334);
+        await sendCommand(writer, reader, btoa(SMTP_CONFIG.user), 334);
+        await sendCommand(writer, reader, btoa(SMTP_CONFIG.pass), 235);
+        await sendCommand(writer, reader, `MAIL FROM: <${SMTP_CONFIG.user}>`, 250);
+        await sendCommand(writer, reader, `RCPT TO: <${to}>`, 250);
+        await sendCommand(writer, reader, 'DATA', 354);
+
+        const boundary = 'boundary_' + Date.now();
+        const messageId = `<${Date.now()}@2x.nz>`;
+        const date = new Date().toUTCString();
+
+        // IMPORTANT: SMTP requires CRLF (\r\n) for line breaks
+        // Added Message-ID and Date headers to comply with stricter spam filters (like Cloudflare Email Routing)
+        const message = 
+`From: Forum Admin <${SMTP_CONFIG.user}>
+To: ${to}
+Subject: ${subject}
+Date: ${date}
+Message-ID: ${messageId}
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="${boundary}"
+
+--${boundary}
+Content-Type: text/plain; charset=utf-8
+
+${htmlContent.replace(/<[^>]*>/g, '')}
+
+--${boundary}
+Content-Type: text/html; charset=utf-8
+
+${htmlContent}
+
+--${boundary}--
+.`
+        .replace(/\r\n/g, '\n') // Normalize to LF first
+        .replace(/\n/g, '\r\n'); // Convert all LF to CRLF
+
+        await sendCommand(writer, reader, message, 250);
+        await sendCommand(writer, reader, 'QUIT', 221);
+        console.log('[SMTP] Email sent successfully');
+
+    } catch (e) {
+        console.error('[SMTP] Failed to send email:', e);
+        throw e;
+    } finally {
+        try {
+            writer.releaseLock();
+            reader.releaseLock();
+            socket.close();
+        } catch (e) { }
+    }
+}
+
+// Resend API Send Function
+async function sendViaResend(env: any, to: string, subject: string, htmlContent: string) {
+    if (!env.RESEND_KEY) {
+        throw new Error('RESEND_KEY is missing in env');
+    }
+    
+    console.log('[Resend] Sending email via API...');
+    const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${env.RESEND_KEY}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            from: `Forum Admin <${env.RESEND_SEND || 'onboarding@resend.dev'}>`,
+            to: [to],
+            subject: subject,
+            html: htmlContent,
+        })
+    });
+
+    if (!res.ok) {
+        const err = await res.text();
+        console.error('[Resend] API Error:', err);
+        throw new Error(`Resend API Error: ${err}`);
+    } else {
+        console.log('[Resend] Email sent successfully');
+    }
+}
+
+// Main export
+export async function sendEmail(to: string, subject: string, htmlContent: string, env?: any) {
+    // Try Resend if configured
+    if (env && env.RESEND_KEY) {
+        try {
+            await sendViaResend(env, to, subject, htmlContent);
+            return;
+        } catch (e) {
+            console.error('[Resend] Failed, falling back to SMTP if possible...', e);
+        }
+    }
+
+    // Fallback to SMTP
+    await sendViaSMTP(to, subject, htmlContent);
+}
