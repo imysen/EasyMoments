@@ -97,6 +97,21 @@ async function sendCommand(
     return response;
 }
 
+// Helper to encode headers (RFC 2047) if they contain non-ASCII characters
+function encodeHeader(str: string): string {
+    // Check if string contains only ASCII (printable)
+    if (/^[\x20-\x7E]*$/.test(str)) {
+        return str;
+    }
+    
+    // Use Base64 encoding for UTF-8
+    const utf8Bytes = new TextEncoder().encode(str);
+    const binary = String.fromCharCode(...utf8Bytes);
+    const base64 = btoa(binary);
+    
+    return `=?UTF-8?B?${base64}?=`;
+}
+
 // SMTP Send Function
 async function sendViaSMTP(to: string, subject: string, htmlContent: string) {
     console.log(`[SMTP] Connecting to ${SMTP_CONFIG.hostname}:${SMTP_CONFIG.port}...`);
@@ -125,13 +140,16 @@ async function sendViaSMTP(to: string, subject: string, htmlContent: string) {
         const boundary = 'boundary_' + Date.now();
         const messageId = `<${Date.now()}@2x.nz>`;
         const date = new Date().toUTCString();
+        
+        // Encode Subject if necessary
+        const encodedSubject = encodeHeader(subject);
 
         // IMPORTANT: SMTP requires CRLF (\r\n) for line breaks
         // Added Message-ID and Date headers to comply with stricter spam filters (like Cloudflare Email Routing)
         const message = 
 `From: Forum Admin <${SMTP_CONFIG.user}>
 To: ${to}
-Subject: ${subject}
+Subject: ${encodedSubject}
 Date: ${date}
 Message-ID: ${messageId}
 MIME-Version: 1.0

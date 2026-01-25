@@ -609,14 +609,14 @@ export default {
 				const resetLink = `${baseUrl}/?reset_token=${token}`;
 				
 				const emailHtml = `
-					<h1>Password Reset Request</h1>
-					<p>Click the link below to reset your password:</p>
-					<a href="${resetLink}">Reset Password</a>
-					<p>If you did not request this, please ignore this email.</p>
-					<p>This link expires in 1 hour.</p>
+					<h1>密码重置请求</h1>
+					<p>请点击下方链接重置您的密码：</p>
+					<a href="${resetLink}">重置密码</a>
+					<p>如果您未请求此操作，请忽略此邮件。</p>
+					<p>此链接将在 1 小时后失效。</p>
 				`;
 
-				ctx.waitUntil(sendEmail(email, 'Password Reset', emailHtml).catch(console.error));
+				ctx.waitUntil(sendEmail(email, '密码重置请求', emailHtml).catch(console.error));
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -685,6 +685,8 @@ export default {
 				
 				if (!new_email) return jsonResponse({ error: 'Missing parameters' }, 400);
 				
+				if (new_email.length > 50) return jsonResponse({ error: 'Email too long (Max 50 chars)' }, 400);
+				
 				const user_id = userPayload.id;
 
 				const user = await env.forum_db.prepare('SELECT * FROM users WHERE id = ?').bind(user_id).first();
@@ -717,12 +719,12 @@ export default {
 				const baseUrl = 'https://i.2x.nz';
 				const verifyLink = `${baseUrl}/api/verify-email-change?token=${token}`;
 				const emailHtml = `
-					<h1>Confirm Email Change</h1>
-					<p>Click the link below to confirm changing your email to ${new_email}:</p>
-					<a href="${verifyLink}">Confirm Change</a>
+					<h1>确认更换邮箱</h1>
+					<p>请点击下方链接确认将您的邮箱更换为 ${new_email}：</p>
+					<a href="${verifyLink}">确认更换</a>
 				`;
 
-				ctx.waitUntil(sendEmail(new_email, 'Confirm Email Change', emailHtml).catch(console.error));
+				ctx.waitUntil(sendEmail(new_email, '确认更换邮箱', emailHtml).catch(console.error));
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -764,6 +766,7 @@ export default {
 					await env.forum_db.prepare('UPDATE users SET password = ? WHERE id = ?').bind(hash, id).run();
 				}
 				if (email) {
+					if (email.length > 50) return jsonResponse({ error: 'Email too long (Max 50 chars)' }, 400);
 					await env.forum_db.prepare('UPDATE users SET email = ? WHERE id = ?').bind(email, id).run();
 				}
 				if (avatar_url !== undefined) {
@@ -783,10 +786,10 @@ export default {
 					if (notifyAvatar && notifyAvatar.value === '1') {
 						const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
 						const emailHtml = `
-							<h1>Avatar Updated</h1>
-							<p>Your avatar has been updated by an administrator.</p>
+							<h1>头像已更新</h1>
+							<p>您的头像已被管理员更新。</p>
 						`;
-						ctx.waitUntil(sendEmail(user.email, 'Your avatar has been updated', emailHtml).catch(console.error));
+						ctx.waitUntil(sendEmail(user.email, '您的头像已更新', emailHtml).catch(console.error));
 					}
 				}
 				if (username) {
@@ -802,11 +805,11 @@ export default {
 					if (notifyUsername && notifyUsername.value === '1') {
 						const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
 						const emailHtml = `
-							<h1>Username Changed</h1>
-							<p>Your username has been changed to <strong>${username}</strong> by an administrator.</p>
-							<p>If you have any questions, please contact support.</p>
+							<h1>用户名已修改</h1>
+							<p>您的用户名已被管理员修改为 <strong>${username}</strong>。</p>
+							<p>如有疑问，请联系管理员。</p>
 						`;
-						ctx.waitUntil(sendEmail(user.email, 'Your username has been changed', emailHtml).catch(console.error));
+						ctx.waitUntil(sendEmail(user.email, '您的用户名已修改', emailHtml).catch(console.error));
 					}
 				}
 				
@@ -938,11 +941,11 @@ export default {
 				if (setting && setting.value === '1') {
 					const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
 					const emailHtml = `
-						<h1>Account Verified</h1>
-						<p>Your account (Username: <strong>${user.username}</strong>) has been manually verified by an administrator.</p>
-						<p>You can now log in and access all features.</p>
+						<h1>账户已验证</h1>
+						<p>您的账户 (用户名: <strong>${user.username}</strong>) 已通过管理员手动验证。</p>
+						<p>您现在可以登录并使用所有功能。</p>
 					`;
-					ctx.waitUntil(sendEmail(user.email as string, 'Your account has been verified', emailHtml).catch(console.error));
+					ctx.waitUntil(sendEmail(user.email as string, '您的账户已通过验证', emailHtml).catch(console.error));
 				}
 
 				return jsonResponse({ success });
@@ -972,14 +975,14 @@ export default {
 				const baseUrl = 'https://i.2x.nz';
 				const verifyLink = `${baseUrl}/api/verify?token=${token}`;
 				const emailHtml = `
-					<h1>Welcome to the Forum, ${user.username}!</h1>
-					<p>Please click the link below to verify your email address:</p>
-					<a href="${verifyLink}">Verify Email</a>
-					<p>If you did not request this, please ignore this email.</p>
+					<h1>欢迎加入论坛，${user.username}！</h1>
+					<p>请点击下方链接验证您的邮箱地址：</p>
+					<a href="${verifyLink}">验证邮箱</a>
+					<p>如果您未请求此操作，请忽略此邮件。</p>
 				`;
 
 				ctx.waitUntil(
-					sendEmail(user.email, 'Please verify your email', emailHtml)
+					sendEmail(user.email, '请验证您的邮箱', emailHtml)
 						.catch(err => console.error('[Background Email Error]', err))
 				);
 				
@@ -1038,11 +1041,11 @@ export default {
 					const setting = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_user_delete'").first();
 					if (setting && setting.value === '1') {
 						const emailHtml = `
-							<h1>Account Deleted</h1>
-							<p>Your account (Username: <strong>${userToDelete.username}</strong>) has been deleted by an administrator.</p>
-							<p>If you believe this is an error, please contact support.</p>
+							<h1>账户已删除</h1>
+							<p>您的账户 (用户名: <strong>${userToDelete.username}</strong>) 已被管理员删除。</p>
+							<p>如果您认为这是误操作，请联系管理员。</p>
 						`;
-						ctx.waitUntil(sendEmail(userToDelete.email as string, 'Your account has been deleted', emailHtml).catch(console.error));
+						ctx.waitUntil(sendEmail(userToDelete.email as string, '您的账户已被删除', emailHtml).catch(console.error));
 					}
 				}
 
@@ -1246,6 +1249,8 @@ export default {
 					return jsonResponse({ error: 'Missing email, username or password' }, 400);
 				}
 
+				if (email.length > 50) return jsonResponse({ error: 'Email too long (Max 50 chars)' }, 400);
+
 				if (username.length > 20) return jsonResponse({ error: 'Username too long (Max 20 chars)' }, 400);
 				if (isVisuallyEmpty(username)) return jsonResponse({ error: 'Username cannot be empty' }, 400);
 				if (hasInvisibleCharacters(username)) return jsonResponse({ error: 'Username contains invalid invisible characters' }, 400);
@@ -1270,14 +1275,14 @@ export default {
 				const verifyLink = `${baseUrl}/api/verify?token=${verificationToken}`;
 				
 				const emailHtml = `
-					<h1>Welcome to the Forum, ${username}!</h1>
-					<p>Please click the link below to verify your email address:</p>
-					<a href="${verifyLink}">Verify Email</a>
-					<p>If you did not request this, please ignore this email.</p>
+					<h1>欢迎加入论坛，${username}！</h1>
+					<p>请点击下方链接验证您的邮箱地址：</p>
+					<a href="${verifyLink}">验证邮箱</a>
+					<p>如果您未请求此操作，请忽略此邮件。</p>
 				`;
 
 				try {
-					await sendEmail(email, 'Please verify your email', emailHtml);
+					await sendEmail(email, '请验证您的邮箱', emailHtml);
 				} catch (e) {
 					console.error('[Registration Email Error]', e);
 					return jsonResponse({ error: 'Failed to send verification email. Please check your email address.' }, 400);
