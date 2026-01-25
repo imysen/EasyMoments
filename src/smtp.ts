@@ -9,6 +9,46 @@ const SMTP_CONFIG = {
     pass: 'd2pMDZXNmq4mjWyQ'
 };
 
+// Helper to check MX records via DNS-over-HTTPS (Cloudflare DNS)
+async function checkMX(email: string): Promise<boolean> {
+    const domain = email.split('@')[1];
+    if (!domain) return false;
+
+    try {
+        const res = await fetch(`https://cloudflare-dns.com/dns-query?name=${domain}&type=MX`, {
+            headers: { 'Accept': 'application/dns-json' }
+        });
+        
+        if (!res.ok) {
+            console.warn(`[MX Check] DoH API failed for ${domain}, skipping check.`);
+            return true; // Fail open if API is down
+        }
+        
+        const data: any = await res.json();
+        
+        // Status 0 means NOERROR. 
+        // If Status is NXDOMAIN (3), domain doesn't exist.
+        if (data.Status !== 0) {
+             console.error(`[MX Check] DNS Error for ${domain}: Status ${data.Status}`);
+             return false;
+        }
+        
+        // Check if Answer exists and has entries
+        // Note: Some domains might rely on A record fallback, but it's rare and bad practice.
+        // We strictly check for MX records as requested.
+        // Cloudflare returns "Answer" array if records exist.
+        if (!data.Answer || !Array.isArray(data.Answer) || data.Answer.length === 0) {
+             console.error(`[MX Check] No MX records found for ${domain}`);
+             return false;
+        }
+
+        return true;
+    } catch (e) {
+        console.error(`[MX Check] Failed to resolve MX for ${domain}`, e);
+        return true; // Fail open on network error
+    }
+}
+
 // Simple helper to send a command and wait for expected response code
 async function sendCommand(
     writer: WritableStreamDefaultWriter<Uint8Array>,
@@ -160,6 +200,11 @@ async function sendViaResend(env: any, to: string, subject: string, htmlContent:
 
 // Main export
 export async function sendEmail(to: string, subject: string, htmlContent: string, env?: any) {
+    // 1. Check MX Records first
+    if (!(await checkMX(to))) {
+        throw new Error(`Invalid email domain (No MX records found for ${to})`);
+    }
+
     // Try Resend if configured
     if (env && env.RESEND_KEY) {
         try {

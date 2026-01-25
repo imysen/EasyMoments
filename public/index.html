@@ -450,7 +450,7 @@
                         <option value="">无分类</option>
                         <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
                      </select>
-                     <button @click="deletePost(currentPost.id); goHome()" class="text-red-500 hover:text-red-700 text-sm">删除帖子</button>
+                     <button @click="deletePost(currentPost.id)" class="text-red-500 hover:text-red-700 text-sm">删除帖子</button>
                 </div>
                 <h1 class="text-3xl font-bold text-gray-800 mb-2">
                     <span v-if="currentPost.is_pinned" class="text-green-600 mr-2">📌</span>
@@ -464,7 +464,7 @@
                             <span v-if="currentPost.author_role === 'admin'" class="bg-red-100 text-red-800 text-xs px-1.5 py-0.5 rounded ml-1 border border-red-200">管理员</span>
                             <span v-if="currentPost.category_name" class="bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded-full ml-1 border border-blue-200 cursor-pointer" @click="view = 'home'; selectedCategory = currentPost.category_id; fetchPosts(0)">{{ currentPost.category_name }}</span>
                             <button v-if="currentUser && (currentUser.id === currentPost.author_id || currentUser.role === 'admin')" @click="startEditPost(currentPost)" class="text-blue-500 text-xs ml-2 hover:underline">编辑</button>
-                            <button v-if="currentUser && currentUser.id === currentPost.author_id" @click="deletePost(currentPost.id); goHome()" class="text-red-500 text-xs ml-2 hover:underline">删除</button>
+                            <button v-if="currentUser && currentUser.id === currentPost.author_id" @click="deletePost(currentPost.id)" class="text-red-500 text-xs ml-2 hover:underline">删除</button>
                         </p>
                         <p class="text-gray-500">{{ formatDate(currentPost.created_at) }}</p>
                     </div>
@@ -1347,6 +1347,11 @@
                         });
                         if (res.ok) {
                             alert('帖子已删除');
+                            posts.value = posts.value.filter(p => p.id !== id);
+                            if (totalPosts.value > 0) totalPosts.value--;
+                            if (view.value === 'post') {
+                                goHome();
+                            }
                         } else {
                             alert((await res.json()).error);
                         }
@@ -1832,7 +1837,23 @@
                 const deleteUser = async (id) => { if (confirm('确定要删除此用户吗？')) { await fetch(`${API_BASE}/admin/users/${id}`, { method: 'DELETE', headers: getSecurityHeaders('DELETE') }); fetchAdminData(); } };
                 const manualVerify = async (id) => { if (confirm('确认手动验证此用户？')) { await fetch(`${API_BASE}/admin/users/${id}/verify`, { method: 'POST', headers: getSecurityHeaders('POST') }); fetchAdminData(); } };
                 const resendEmail = async (id) => { if (confirm('重新发送验证邮件？')) { await fetch(`${API_BASE}/admin/users/${id}/resend`, { method: 'POST', headers: getSecurityHeaders('POST') }); alert('已发送'); } };
-                const adminDeletePost = async (id) => { if (confirm('确定要删除此帖子吗？')) { await fetch(`${API_BASE}/admin/posts/${id}`, { method: 'DELETE', headers: getSecurityHeaders('DELETE') }); fetchPosts(); } };
+                const adminDeletePost = async (id) => { 
+                    if (!confirm('确定要删除此帖子吗？')) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/posts/${id}`, { 
+                            method: 'DELETE', 
+                            headers: getSecurityHeaders('DELETE') 
+                        });
+                        if (res.ok) {
+                            posts.value = posts.value.filter(p => p.id !== id);
+                            if (totalPosts.value > 0) totalPosts.value--;
+                        } else {
+                            alert((await res.json()).error);
+                        }
+                    } catch (e) {
+                        alert(e.message);
+                    }
+                };
                 
                 const togglePin = async (post) => {
                     if (!confirm(post.is_pinned ? '取消置顶此帖子？' : '置顶此帖子？')) return;
