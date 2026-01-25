@@ -1,9 +1,22 @@
 
 import { sendEmail } from './smtp';
-import { uploadImage } from './s3';
+import { generateIdenticon } from './identicon';
+import { uploadImage, deleteImage, listAllKeys, getPublicUrl, S3Env } from './s3';
 import * as OTPAuth from 'otpauth';
 import { Security, UserPayload } from './security';
 import html from '../public/index.html';
+
+// Utility to extract image URLs from Markdown content
+function extractImageUrls(content: string): string[] {
+	if (!content) return [];
+	const urls: string[] = [];
+	const regex = /!\[.*?\]\((.*?)\)/g;
+	let match;
+	while ((match = regex.exec(content)) !== null) {
+		urls.push(match[1]);
+	}
+	return urls;
+}
 
 // Utility to hash password
 async function hashPassword(password: string): Promise<string> {
@@ -30,6 +43,32 @@ function generateToken(): string {
 function hasControlCharacters(str: string): boolean {
 	// eslint-disable-next-line no-control-regex
 	return /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(str);
+}
+
+// Utility to check if string is visually empty (only whitespace or invisible chars)
+function isVisuallyEmpty(str: string): boolean {
+	if (!str) return true;
+	// Replace whitespace and common invisible characters
+	// \u200B-\u200F: Zero Width Space, ZWNJ, ZWJ, LRM, RLM
+	// \uFEFF: BOM
+	// \u2028-\u2029: Line/Paragraph Separator
+	// \u180E: Mongolian Vowel Separator
+    // \u3164: Hangul Filler
+    // \u115F-\u1160: Hangul Choseong/Jungseong Filler
+	// \x00-\x1F\x7F: ASCII Control Chars
+	const stripped = str.replace(/[\s\u200B-\u200F\uFEFF\u2028\u2029\u180E\u3164\u115F\u1160\x00-\x1F\x7F]+/g, '');
+	return stripped.length === 0;
+}
+
+// Utility to check for invisible characters
+function hasInvisibleCharacters(str: string): boolean {
+	return /[\u200B-\u200F\uFEFF\u2028\u2029\u180E\u3164\u115F\u1160]/.test(str);
+}
+
+// Utility to check restricted username keywords
+function hasRestrictedKeywords(username: string): boolean {
+	const restricted = ['管理', 'admin', 'sudo', 'acofork', '二叉树树', '胡丁','huding'];
+	return restricted.some(keyword => username.toLowerCase().includes(keyword.toLowerCase()));
 }
 
 const TURNSTILE_SECRET_KEY = '0x4AAAAAACOKzIrdFybmAD67qwlERVgvLMc';
@@ -78,6 +117,16 @@ export default {
 			});
 		};
 
+		// Helper to handle errors
+		const handleError = (e: any) => {
+			const errString = String(e);
+			if (errString.includes('Unauthorized') || errString.includes('Invalid Token')) {
+				return jsonResponse({ error: 'Unauthorized' }, 401);
+			}
+			return jsonResponse({ error: errString }, 500);
+		};
+
+
         // --- AUTH MIDDLEWARE HELPER ---
         const authenticate = async (req: Request): Promise<UserPayload> => {
             const authHeader = req.headers.get('Authorization');
@@ -118,26 +167,71 @@ export default {
 		// GET /api/config
 		if (url.pathname === '/api/config' && method === 'GET') {
 			try {
-				const setting = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first();
+				const [setting, userCount] = await Promise.all([
+					env.forum_db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first(),
+					env.forum_db.prepare('SELECT COUNT(*) as count FROM users').first('count')
+				]);
+				
 				return jsonResponse({
 					turnstile_enabled: setting ? setting.value === '1' : false,
-					turnstile_site_key: '0x4AAAAAACOKzENkFhyGzGm4'
+					turnstile_site_key: '0x4AAAAAACOKzENkFhyGzGm4',
+					user_count: userCount || 0
 				});
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
+			}
+		}
+
+		// GET /api/admin/settings
+		if (url.pathname === '/api/admin/settings' && method === 'GET') {
+			try {
+				const userPayload = await authenticate(request);
+				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
+
+				const settings = await env.forum_db.prepare("SELECT key, value FROM settings").all();
+				const config: any = {
+					turnstile_enabled: false,
+					notify_on_user_delete: false,
+					notify_on_username_change: false,
+					notify_on_avatar_change: false,
+					notify_on_manual_verify: false
+				};
+				
+				if (settings.results) {
+					for (const row of settings.results) {
+						config[row.key as string] = row.value === '1';
+					}
+				}
+				
+				return jsonResponse(config);
+			} catch (e) {
+				return handleError(e);
 			}
 		}
 
 		// POST /api/admin/settings
 		if (url.pathname === '/api/admin/settings' && method === 'POST') {
 			try {
+				const userPayload = await authenticate(request);
+				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
+
 				const body = await request.json() as any;
-				const { turnstile_enabled } = body;
+				const { turnstile_enabled, notify_on_user_delete, notify_on_username_change, notify_on_avatar_change, notify_on_manual_verify } = body;
 				
-				await env.forum_db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('turnstile_enabled', ?)").bind(turnstile_enabled ? '1' : '0').run();
+				const stmt = env.forum_db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
+				const batch = [];
+
+				if (turnstile_enabled !== undefined) batch.push(stmt.bind('turnstile_enabled', turnstile_enabled ? '1' : '0'));
+				if (notify_on_user_delete !== undefined) batch.push(stmt.bind('notify_on_user_delete', notify_on_user_delete ? '1' : '0'));
+				if (notify_on_username_change !== undefined) batch.push(stmt.bind('notify_on_username_change', notify_on_username_change ? '1' : '0'));
+				if (notify_on_avatar_change !== undefined) batch.push(stmt.bind('notify_on_avatar_change', notify_on_avatar_change ? '1' : '0'));
+				if (notify_on_manual_verify !== undefined) batch.push(stmt.bind('notify_on_manual_verify', notify_on_manual_verify ? '1' : '0'));
+				
+				if (batch.length > 0) await env.forum_db.batch(batch);
+
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 		
@@ -177,13 +271,13 @@ export default {
 					return jsonResponse({ error: 'File size too large (Max 500KB)' }, 400);
 				}
 
-				const imageUrl = await uploadImage(file, userId, postId.toString(), type as 'post' | 'avatar');
+				const imageUrl = await uploadImage(env as unknown as S3Env, file, userId, postId.toString(), type as 'post' | 'avatar');
 				await security.logAudit(user.id, 'UPLOAD_IMAGE', 'image', imageUrl, { type, postId }, request);
 				
 				return jsonResponse({ success: true, url: imageUrl });
 			} catch (e) {
 				console.error('Upload error:', e);
-				return jsonResponse({ error: String(e) }, 500); // 401/403 will be caught here if auth fails
+				return handleError(e); // 401/403 will be caught here if auth fails
 			}
 		}
 
@@ -255,7 +349,6 @@ export default {
 						id: user.id,
 						email: user.email,
 						username: user.username,
-						nickname: user.nickname,
 						avatar_url: user.avatar_url,
 						role: user.role || 'user',
 						totp_enabled: !!user.totp_enabled,
@@ -263,7 +356,7 @@ export default {
 					}
 				});
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -272,18 +365,56 @@ export default {
 			try {
 				const userPayload = await authenticate(request);
 				const body = await request.json() as any;
-				const { nickname, avatar_url, email_notifications } = body;
+				const { username, avatar_url, email_notifications } = body;
 				
 				const user_id = userPayload.id;
 
-				if (nickname && nickname.length > 20) return jsonResponse({ error: 'Nickname too long (Max 20 chars)' }, 400);
+				if (username) {
+					if (username.length > 20) return jsonResponse({ error: 'Username too long (Max 20 chars)' }, 400);
+					if (isVisuallyEmpty(username)) return jsonResponse({ error: 'Username cannot be empty' }, 400);
+					if (hasInvisibleCharacters(username)) return jsonResponse({ error: 'Username contains invalid invisible characters' }, 400);
+					if (hasControlCharacters(username)) return jsonResponse({ error: 'Username contains invalid control characters' }, 400);
+					if (hasRestrictedKeywords(username)) return jsonResponse({ error: 'Username contains restricted keywords' }, 400);
+					
+					// Check Uniqueness
+					const existingUser = await env.forum_db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').bind(username, user_id).first();
+					if (existingUser) {
+						return jsonResponse({ error: 'Username already taken' }, 409);
+					}
+				}
 
-				await env.forum_db.prepare('UPDATE users SET nickname = ?, avatar_url = ?, email_notifications = ? WHERE id = ?')
-					.bind(nickname || null, avatar_url || null, email_notifications ? 1 : 0, user_id).run();
+				// Fetch current user
+				const currentUser = await env.forum_db.prepare('SELECT * FROM users WHERE id = ?').bind(user_id).first();
+				if (!currentUser) return jsonResponse({ error: 'User not found' }, 404);
+
+				let newUsername = currentUser.username;
+				if (username !== undefined) {
+					newUsername = username;
+				}
+
+				let newAvatarUrl = currentUser.avatar_url;
+				if (avatar_url !== undefined) {
+					if (avatar_url === '' || avatar_url === null) {
+						// Generate Identicon
+						newAvatarUrl = await generateIdenticon(String(user_id));
+					} else {
+						if (avatar_url.length > 500) return jsonResponse({ error: 'Avatar URL too long (Max 500 chars)' }, 400);
+						if (!/^https?:\/\//i.test(avatar_url) && !avatar_url.startsWith('data:image/svg+xml')) return jsonResponse({ error: 'Invalid Avatar URL (Must start with http:// or https://)' }, 400);
+						newAvatarUrl = avatar_url;
+					}
+				}
+
+				let newEmailNotif = currentUser.email_notifications;
+				if (email_notifications !== undefined) {
+					newEmailNotif = email_notifications ? 1 : 0;
+				}
+
+				await env.forum_db.prepare('UPDATE users SET username = ?, avatar_url = ?, email_notifications = ? WHERE id = ?')
+					.bind(newUsername, newAvatarUrl, newEmailNotif, user_id).run();
 
 				const user = await env.forum_db.prepare('SELECT * FROM users WHERE id = ?').bind(user_id).first();
 				
-				await security.logAudit(userPayload.id, 'UPDATE_PROFILE', 'user', String(user_id), { nickname }, request);
+				await security.logAudit(userPayload.id, 'UPDATE_PROFILE', 'user', String(user_id), { username: newUsername }, request);
 
 				return jsonResponse({
 					success: true,
@@ -291,7 +422,6 @@ export default {
 						id: user.id,
 						email: user.email,
 						username: user.username,
-						nickname: user.nickname,
 						avatar_url: user.avatar_url,
 						role: user.role || 'user',
 						totp_enabled: !!user.totp_enabled,
@@ -299,7 +429,7 @@ export default {
 					}
 				});
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -338,8 +468,35 @@ export default {
 				}
 
 				// Delete User and Data
+				
+				// 1. Delete images (Avatar + Post images)
+				const posts = await env.forum_db.prepare('SELECT content FROM posts WHERE author_id = ?').bind(user_id).all();
+				const deletionPromises: Promise<any>[] = [];
+				
+				if (user.avatar_url) {
+					deletionPromises.push(deleteImage(env as unknown as S3Env, user.avatar_url, user_id));
+				}
+				
+				if (posts.results) {
+					for (const post of posts.results) {
+						const imageUrls = extractImageUrls(post.content as string);
+						imageUrls.forEach(url => deletionPromises.push(deleteImage(env as unknown as S3Env, url, user_id)));
+					}
+				}
+				
+				if (deletionPromises.length > 0) {
+					 ctx.waitUntil(Promise.all(deletionPromises).catch(err => console.error('Failed to delete user images', err)));
+				}
+
+				// 2. Delete likes/comments ON user's posts (Cascade manually)
+				await env.forum_db.prepare('DELETE FROM likes WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(user_id).run();
+				await env.forum_db.prepare('DELETE FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(user_id).run();
+
+				// 3. Delete user's activity
 				await env.forum_db.prepare('DELETE FROM likes WHERE user_id = ?').bind(user_id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE author_id = ?').bind(user_id).run();
+				
+				// 4. Delete posts and user
 				await env.forum_db.prepare('DELETE FROM posts WHERE author_id = ?').bind(user_id).run();
 				await env.forum_db.prepare('DELETE FROM users WHERE id = ?').bind(user_id).run();
 				
@@ -347,7 +504,7 @@ export default {
 
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -355,12 +512,8 @@ export default {
 		if (url.pathname === '/api/user/totp/setup' && method === 'POST') {
 			try {
 				const userPayload = await authenticate(request);
-				const body = await request.json() as any;
-				const { user_id } = body; 
+				const user_id = userPayload.id; // Force use of authenticated ID
 				
-				if (!user_id) return jsonResponse({ error: 'Missing user_id' }, 400);
-				if (userPayload.id !== user_id) return jsonResponse({ error: 'Unauthorized' }, 403);
-
 				const secret = new OTPAuth.Secret({ size: 20 });
 				const secretBase32 = secret.base32;
 
@@ -384,7 +537,7 @@ export default {
 					uri: totp.toString() 
 				});
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -393,10 +546,10 @@ export default {
 			try {
 				const userPayload = await authenticate(request);
 				const body = await request.json() as any;
-				const { user_id, token } = body;
+				const { token } = body;
+				const user_id = userPayload.id; // Force use of authenticated ID
 
-				if (!user_id || !token) return jsonResponse({ error: 'Missing parameters' }, 400);
-				if (userPayload.id !== user_id) return jsonResponse({ error: 'Unauthorized' }, 403);
+				if (!token) return jsonResponse({ error: 'Missing parameters' }, 400);
 
 				const user = await env.forum_db.prepare('SELECT totp_secret FROM users WHERE id = ?').bind(user_id).first();
 				
@@ -419,7 +572,7 @@ export default {
 					return jsonResponse({ error: 'Invalid code' }, 400);
 				}
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -466,7 +619,7 @@ export default {
 				ctx.waitUntil(sendEmail(email, 'Password Reset', emailHtml).catch(console.error));
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -492,7 +645,8 @@ export default {
 
 				if (new_password.length < 8 || new_password.length > 16) return jsonResponse({ error: 'Password must be 8-16 characters' }, 400);
 
-				// Verify tokenuser = await env.forum_db.prepare('SELECT * FROM users WHERE reset_token = ?').bind(token).first();
+				// Verify token
+				const user = await env.forum_db.prepare('SELECT * FROM users WHERE reset_token = ?').bind(token).first();
 				
 				if (!user) return jsonResponse({ error: 'Invalid token' }, 400);
 				if (Date.now() > user.reset_token_expires) return jsonResponse({ error: 'Token expired' }, 400);
@@ -518,7 +672,7 @@ export default {
 
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -571,7 +725,7 @@ export default {
 				ctx.waitUntil(sendEmail(new_email, 'Confirm Email Change', emailHtml).catch(console.error));
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -601,7 +755,7 @@ export default {
 				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
 
 				const body = await request.json() as any;
-				const { password, email, username } = body;
+				const { password, email, username, avatar_url } = body;
 
 				if (password && (password.length < 8 || password.length > 16)) return jsonResponse({ error: 'Password must be 8-16 characters' }, 400);
 
@@ -612,25 +766,55 @@ export default {
 				if (email) {
 					await env.forum_db.prepare('UPDATE users SET email = ? WHERE id = ?').bind(email, id).run();
 				}
+				if (avatar_url !== undefined) {
+					// Allow clearing avatar with empty string or null -> Force Regenerate Default
+					if (!avatar_url) {
+						// Reset to Default
+						const identicon = await generateIdenticon(String(id));
+						await env.forum_db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').bind(identicon, id).run();
+					} else {
+						if (avatar_url.length > 500) return jsonResponse({ error: 'Avatar URL too long (Max 500 chars)' }, 400);
+						if (!/^https?:\/\//i.test(avatar_url) && !avatar_url.startsWith('data:image/svg+xml')) return jsonResponse({ error: 'Invalid Avatar URL' }, 400);
+						await env.forum_db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').bind(avatar_url, id).run();
+					}
+
+					// Notify Avatar Change
+					const notifyAvatar = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_avatar_change'").first();
+					if (notifyAvatar && notifyAvatar.value === '1') {
+						const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
+						const emailHtml = `
+							<h1>Avatar Updated</h1>
+							<p>Your avatar has been updated by an administrator.</p>
+						`;
+						ctx.waitUntil(sendEmail(user.email, 'Your avatar has been updated', emailHtml).catch(console.error));
+					}
+				}
 				if (username) {
 					if (username.length > 20) return jsonResponse({ error: 'Username too long (Max 20 chars)' }, 400);
+					if (isVisuallyEmpty(username)) return jsonResponse({ error: 'Username cannot be empty' }, 400);
+					if (hasInvisibleCharacters(username)) return jsonResponse({ error: 'Username contains invalid invisible characters' }, 400);
+					if (hasControlCharacters(username)) return jsonResponse({ error: 'Username contains invalid control characters' }, 400);
+					
 					await env.forum_db.prepare('UPDATE users SET username = ? WHERE id = ?').bind(username, id).run();
 
 					// Notify user about username change
-					const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
-					const emailHtml = `
-						<h1>Username Changed</h1>
-						<p>Your username has been changed to <strong>${username}</strong> by an administrator.</p>
-						<p>If you have any questions, please contact support.</p>
-					`;
-					ctx.waitUntil(sendEmail(user.email, 'Your username has been changed', emailHtml).catch(console.error));
+					const notifyUsername = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_username_change'").first();
+					if (notifyUsername && notifyUsername.value === '1') {
+						const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
+						const emailHtml = `
+							<h1>Username Changed</h1>
+							<p>Your username has been changed to <strong>${username}</strong> by an administrator.</p>
+							<p>If you have any questions, please contact support.</p>
+						`;
+						ctx.waitUntil(sendEmail(user.email, 'Your username has been changed', emailHtml).catch(console.error));
+					}
 				}
 				
-				await security.logAudit(userPayload.id, 'ADMIN_UPDATE_USER', 'user', id, { username, email, passwordChanged: !!password }, request);
+				await security.logAudit(userPayload.id, 'ADMIN_UPDATE_USER', 'user', id, { username, email, avatar_url, passwordChanged: !!password }, request);
 
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -640,7 +824,7 @@ export default {
 				const { results } = await env.forum_db.prepare('SELECT * FROM categories ORDER BY created_at ASC').all();
 				return jsonResponse(results);
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -658,7 +842,7 @@ export default {
 				await security.logAudit(userPayload.id, 'CREATE_CATEGORY', 'category', name, {}, request);
 				return jsonResponse({ success });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -677,7 +861,7 @@ export default {
 				await security.logAudit(userPayload.id, 'UPDATE_CATEGORY', 'category', id, { name }, request);
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -698,7 +882,7 @@ export default {
 				await security.logAudit(userPayload.id, 'DELETE_CATEGORY', 'category', id, {}, request);
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -710,9 +894,11 @@ export default {
 				const userPayload = await authenticate(request);
 				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
 
-				const userCount = await env.forum_db.prepare('SELECT COUNT(*) as count FROM users').first('count');
-				const postCount = await env.forum_db.prepare('SELECT COUNT(*) as count FROM posts').first('count');
-				const commentCount = await env.forum_db.prepare('SELECT COUNT(*) as count FROM comments').first('count');
+				const [userCount, postCount, commentCount] = await Promise.all([
+					env.forum_db.prepare('SELECT COUNT(*) as count FROM users').first('count'),
+					env.forum_db.prepare('SELECT COUNT(*) as count FROM posts').first('count'),
+					env.forum_db.prepare('SELECT COUNT(*) as count FROM comments').first('count')
+				]);
 				
 				return jsonResponse({
 					users: userCount,
@@ -720,7 +906,7 @@ export default {
 					comments: commentCount
 				});
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -730,10 +916,10 @@ export default {
 				const userPayload = await authenticate(request);
 				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
 
-				const { results } = await env.forum_db.prepare('SELECT id, email, username, role, verified, created_at FROM users ORDER BY created_at DESC').all();
+				const { results } = await env.forum_db.prepare('SELECT id, email, username, role, verified, created_at, avatar_url FROM users ORDER BY created_at DESC').all();
 				return jsonResponse(results);
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -746,9 +932,22 @@ export default {
 
 				const { success } = await env.forum_db.prepare('UPDATE users SET verified = 1, verification_token = NULL WHERE id = ?').bind(id).run();
 				await security.logAudit(userPayload.id, 'MANUAL_VERIFY_USER', 'user', id, {}, request);
+
+				// Notification
+				const setting = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_manual_verify'").first();
+				if (setting && setting.value === '1') {
+					const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
+					const emailHtml = `
+						<h1>Account Verified</h1>
+						<p>Your account (Username: <strong>${user.username}</strong>) has been manually verified by an administrator.</p>
+						<p>You can now log in and access all features.</p>
+					`;
+					ctx.waitUntil(sendEmail(user.email as string, 'Your account has been verified', emailHtml).catch(console.error));
+				}
+
 				return jsonResponse({ success });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -788,7 +987,7 @@ export default {
 
 				return jsonResponse({ success: true, message: 'Verification email sent' });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -798,6 +997,24 @@ export default {
 			try {
 				const userPayload = await authenticate(request);
 				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
+
+				// 0. Delete user avatar and post images
+				const user = await env.forum_db.prepare('SELECT avatar_url FROM users WHERE id = ?').bind(id).first();
+				const posts = await env.forum_db.prepare('SELECT content FROM posts WHERE author_id = ?').bind(id).all();
+				
+				const deletionPromises: Promise<any>[] = [];
+				if (user && user.avatar_url) {
+					deletionPromises.push(deleteImage(env as unknown as S3Env, user.avatar_url, id));
+				}
+				if (posts.results) {
+					for (const post of posts.results) {
+						const imageUrls = extractImageUrls(post.content as string);
+						imageUrls.forEach(url => deletionPromises.push(deleteImage(env as unknown as S3Env, url, id)));
+					}
+				}
+				if (deletionPromises.length > 0) {
+					ctx.waitUntil(Promise.all(deletionPromises).catch(err => console.error('Failed to delete user images', err)));
+				}
 
 				// 1. Delete likes and comments ON the user's posts (to avoid orphans)
 				await env.forum_db.prepare('DELETE FROM likes WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(id).run();
@@ -811,12 +1028,27 @@ export default {
 				await env.forum_db.prepare('DELETE FROM posts WHERE author_id = ?').bind(id).run();
 
 				// 4. Finally, delete the user
+				const userToDelete = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
 				await env.forum_db.prepare('DELETE FROM users WHERE id = ?').bind(id).run();
 				
 				await security.logAudit(userPayload.id, 'ADMIN_DELETE_USER', 'user', id, {}, request);
+
+				// Notification
+				if (userToDelete) {
+					const setting = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_user_delete'").first();
+					if (setting && setting.value === '1') {
+						const emailHtml = `
+							<h1>Account Deleted</h1>
+							<p>Your account (Username: <strong>${userToDelete.username}</strong>) has been deleted by an administrator.</p>
+							<p>If you believe this is an error, please contact support.</p>
+						`;
+						ctx.waitUntil(sendEmail(userToDelete.email as string, 'Your account has been deleted', emailHtml).catch(console.error));
+					}
+				}
+
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -827,6 +1059,15 @@ export default {
 				const userPayload = await authenticate(request);
 				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
 
+				// Delete images in post
+				const post = await env.forum_db.prepare('SELECT content, author_id FROM posts WHERE id = ?').bind(id).first();
+				if (post) {
+					const imageUrls = extractImageUrls(post.content as string);
+					if (imageUrls.length > 0) {
+						ctx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, post.author_id as number))).catch(err => console.error('Failed to delete post images', err)));
+					}
+				}
+
 				await env.forum_db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
@@ -834,7 +1075,7 @@ export default {
 				await security.logAudit(userPayload.id, 'ADMIN_DELETE_POST', 'post', id, {}, request);
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -852,7 +1093,7 @@ export default {
 				await security.logAudit(userPayload.id, 'ADMIN_DELETE_COMMENT', 'comment', id, {}, request);
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -870,7 +1111,7 @@ export default {
 				await security.logAudit(userPayload.id, 'ADMIN_PIN_POST', 'post', id, { pinned }, request);
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -895,7 +1136,77 @@ export default {
 				await security.logAudit(userPayload.id, 'ADMIN_MOVE_POST', 'post', id, { category_id }, request);
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
+			}
+		}
+
+		// GET /api/admin/cleanup/analyze
+		if (url.pathname === '/api/admin/cleanup/analyze' && method === 'GET') {
+			try {
+				const userPayload = await authenticate(request);
+				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
+                                
+				// 1. List all S3 objects
+				const allKeys = await listAllKeys(env as unknown as S3Env);
+				
+				// 2. Gather used URLs
+				const usedKeys = new Set<string>();
+				// Helper to get base endpoint for matching
+				const endpoint = getPublicUrl(env as unknown as S3Env, '').replace(/\/$/, ''); 
+
+				// Users avatars
+				const users = await env.forum_db.prepare('SELECT avatar_url FROM users WHERE avatar_url IS NOT NULL').all();
+				for (const u of users.results) {
+					const uUrl = u.avatar_url as string;
+					if (uUrl && uUrl.startsWith(endpoint)) {
+						usedKeys.add(uUrl.substring(endpoint.length + 1));
+					}
+				}
+
+				// Posts images
+				const posts = await env.forum_db.prepare('SELECT content FROM posts').all();
+				for (const p of posts.results) {
+					const urls = extractImageUrls(p.content as string);
+					for (const uUrl of urls) {
+						if (uUrl && uUrl.startsWith(endpoint)) {
+							usedKeys.add(uUrl.substring(endpoint.length + 1));
+						}
+					}
+				}
+
+				// 3. Find orphans
+				const orphans = allKeys.filter(key => !usedKeys.has(key));
+
+				return jsonResponse({ 
+					total_files: allKeys.length,
+					used_files: usedKeys.size,
+					orphaned_files: orphans.length,
+					orphans: orphans
+				});
+
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
+		// POST /api/admin/cleanup/execute
+		if (url.pathname === '/api/admin/cleanup/execute' && method === 'POST') {
+			try {
+				const userPayload = await authenticate(request);
+				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
+				
+				const body = await request.json() as any;
+				const { orphans } = body;
+				
+				if (!orphans || !Array.isArray(orphans)) return jsonResponse({ error: 'Invalid parameters' }, 400);
+
+				const deletePromises = orphans.map(key => deleteImage(env as unknown as S3Env, getPublicUrl(env as unknown as S3Env, key)));
+				
+				ctx.waitUntil(Promise.all(deletePromises).catch(err => console.error('Cleanup failed', err)));
+				
+				return jsonResponse({ success: true, message: `Deletion of ${orphans.length} files started` });
+			} catch (e) {
+				return handleError(e);
 			}
 		}
 
@@ -915,7 +1226,7 @@ export default {
 				return jsonResponse({ success: true, message: 'Email sent' });
 			} catch (e) {
 				console.error('[DEBUG] Test email failed:', e);
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -936,32 +1247,59 @@ export default {
 				}
 
 				if (username.length > 20) return jsonResponse({ error: 'Username too long (Max 20 chars)' }, 400);
+				if (isVisuallyEmpty(username)) return jsonResponse({ error: 'Username cannot be empty' }, 400);
+				if (hasInvisibleCharacters(username)) return jsonResponse({ error: 'Username contains invalid invisible characters' }, 400);
+				if (hasControlCharacters(username)) return jsonResponse({ error: 'Username contains invalid control characters' }, 400);
+				if (hasRestrictedKeywords(username)) return jsonResponse({ error: 'Username contains restricted keywords' }, 400);
+
 				if (password.length < 8 || password.length > 16) return jsonResponse({ error: 'Password must be 8-16 characters' }, 400);
+
+				// Check Uniqueness (Combined Query for Performance)
+				const existing = await env.forum_db.prepare('SELECT email, username FROM users WHERE email = ? OR username = ?').bind(email, username).first();
+				if (existing) {
+					if (existing.email === email) return jsonResponse({ error: 'Email already exists' }, 409);
+					return jsonResponse({ error: 'Username already taken' }, 409);
+				}
 
 				const passwordHash = await hashPassword(password);
 				const verificationToken = generateToken();
 
-				const { success } = await env.forum_db.prepare(
+				// Pre-check email deliverability (Send a test email first)
+				// Note: We don't insert user yet. If email fails, we abort.
+				const baseUrl = 'https://i.2x.nz';
+				const verifyLink = `${baseUrl}/api/verify?token=${verificationToken}`;
+				
+				const emailHtml = `
+					<h1>Welcome to the Forum, ${username}!</h1>
+					<p>Please click the link below to verify your email address:</p>
+					<a href="${verifyLink}">Verify Email</a>
+					<p>If you did not request this, please ignore this email.</p>
+				`;
+
+				try {
+					await sendEmail(email, 'Please verify your email', emailHtml);
+				} catch (e) {
+					console.error('[Registration Email Error]', e);
+					return jsonResponse({ error: 'Failed to send verification email. Please check your email address.' }, 400);
+				}
+
+				const { success, meta } = await env.forum_db.prepare(
 					'INSERT INTO users (email, username, password, role, verified, verification_token) VALUES (?, ?, ?, "user", 0, ?)'
 				).bind(email, username, passwordHash, verificationToken).run();
 
 				if (success) {
-					// Send verification email asynchronously
-					const baseUrl = 'https://i.2x.nz';
-					const verifyLink = `${baseUrl}/api/verify?token=${verificationToken}`;
-					
-					const emailHtml = `
-						<h1>Welcome to the Forum, ${username}!</h1>
-						<p>Please click the link below to verify your email address:</p>
-						<a href="${verifyLink}">Verify Email</a>
-						<p>If you did not request this, please ignore this email.</p>
-					`;
-					
-					// IMPORTANT: Use waitUntil to ensure background task completes, but catch errors to log them
-					ctx.waitUntil(
-						sendEmail(email, 'Please verify your email', emailHtml)
-							.catch(err => console.error('[Background Email Error]', err))
-					);
+					// Generate Default Avatar (Identicon)
+					// Use ID if available, otherwise fallback to Username
+					const userId = meta?.last_row_id;
+					if (userId) {
+						const identicon = await generateIdenticon(String(userId));
+						await env.forum_db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').bind(identicon, userId).run();
+					} else {
+						// Fallback if ID retrieval fails (rare in D1)
+						const identicon = await generateIdenticon(username);
+						// We don't have ID easily without query, but we can update by username or just skip
+						await env.forum_db.prepare('UPDATE users SET avatar_url = ? WHERE username = ?').bind(identicon, username).run();
+					}
 				}
 
 				return jsonResponse({ success, message: 'User registered successfully. Please check your email to verify your account.' }, 201);
@@ -969,7 +1307,7 @@ export default {
 				if (e.message && e.message.includes('UNIQUE constraint failed')) {
 					return jsonResponse({ error: 'Email already exists' }, 409);
 				}
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -1004,19 +1342,18 @@ export default {
 				).all();
 				return jsonResponse(results);
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
 		// GET /api/user/likes (Get all post IDs liked by user)
 		if (url.pathname === '/api/user/likes' && method === 'GET') {
-			const userId = url.searchParams.get('user_id');
-			if (!userId) return jsonResponse({ error: 'Missing user_id' }, 400);
 			try {
-				const { results } = await env.forum_db.prepare('SELECT post_id FROM likes WHERE user_id = ?').bind(userId).all();
+				const userPayload = await authenticate(request);
+				const { results } = await env.forum_db.prepare('SELECT post_id FROM likes WHERE user_id = ?').bind(userPayload.id).all();
 				return jsonResponse(results.map((r: any) => r.post_id));
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -1030,7 +1367,6 @@ export default {
 				let query = `SELECT 
                         posts.*, 
                         users.username as author_name, 
-                        users.nickname as author_nickname, 
                         users.avatar_url as author_avatar,
                         users.role as author_role,
                         categories.name as category_name,
@@ -1040,19 +1376,37 @@ export default {
                      JOIN users ON posts.author_id = users.id 
                      LEFT JOIN categories ON posts.category_id = categories.id`;
                 
+                let countQuery = `SELECT COUNT(*) as total FROM posts`;
+
                 const params: any[] = [];
+                const countParams: any[] = [];
+
                 if (categoryId) {
-                    query += ` WHERE posts.category_id = ?`;
-                    params.push(categoryId);
+                    if (categoryId === 'uncategorized') {
+                        query += ` WHERE posts.category_id IS NULL`;
+                        countQuery += ` WHERE category_id IS NULL`;
+                    } else {
+                        query += ` WHERE posts.category_id = ?`;
+                        countQuery += ` WHERE category_id = ?`;
+                        params.push(categoryId);
+                        countParams.push(categoryId);
+                    }
                 }
 
                 query += ` ORDER BY is_pinned DESC, posts.created_at DESC LIMIT ? OFFSET ?`;
                 params.push(limit, offset);
 				
-				const { results } = await env.forum_db.prepare(query).bind(...params).all();
-				return jsonResponse(results);
+				const [postsResult, countResult] = await Promise.all([
+                    env.forum_db.prepare(query).bind(...params).all(),
+                    env.forum_db.prepare(countQuery).bind(...countParams).first()
+                ]);
+
+				return jsonResponse({
+                    posts: postsResult.results,
+                    total: countResult ? countResult.total : 0
+                });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -1064,7 +1418,6 @@ export default {
 					`SELECT 
                         posts.*, 
                         users.username as author_name, 
-                        users.nickname as author_nickname, 
                         users.avatar_url as author_avatar,
                         users.role as author_role,
                         categories.name as category_name,
@@ -1087,7 +1440,7 @@ export default {
 
 				return jsonResponse(post);
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -1102,6 +1455,10 @@ export default {
 				if (!title || !content) {
 					return jsonResponse({ error: 'Missing parameters' }, 400);
 				}
+
+				if (isVisuallyEmpty(title) || isVisuallyEmpty(content)) return jsonResponse({ error: 'Title or content cannot be empty' }, 400);
+
+				if (hasInvisibleCharacters(title) || hasInvisibleCharacters(content)) return jsonResponse({ error: 'Title or content contains invalid invisible characters' }, 400);
 
 				// Check ownership or admin
 				const post = await env.forum_db.prepare('SELECT author_id FROM posts WHERE id = ?').bind(postId).first();
@@ -1125,13 +1482,44 @@ export default {
 
 				await env.forum_db.prepare(
 					'UPDATE posts SET title = ?, content = ?, category_id = ? WHERE id = ?'
-				).bind(title, content, category_id || null, postId).run();
+				).bind(title.trim(), content.trim(), category_id || null, postId).run();
 				
 				await security.logAudit(userPayload.id, 'UPDATE_POST', 'post', postId, { title_length: title.length }, request);
 
 				return jsonResponse({ success: true });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
+			}
+		}
+
+		// DELETE /api/posts/:id (User delete own post)
+		if (url.pathname.match(/^\/api\/posts\/\d+$/) && method === 'DELETE') {
+			const id = url.pathname.split('/')[3];
+			try {
+				const userPayload = await authenticate(request);
+				
+				// Check ownership
+				const post = await env.forum_db.prepare('SELECT author_id, content FROM posts WHERE id = ?').bind(id).first();
+				if (!post) return jsonResponse({ error: 'Post not found' }, 404);
+				
+				if (post.author_id !== userPayload.id) {
+					return jsonResponse({ error: 'Unauthorized' }, 403);
+				}
+
+				// Delete images in post
+				const imageUrls = extractImageUrls(post.content as string);
+				if (imageUrls.length > 0) {
+					ctx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, userPayload.id))).catch(err => console.error('Failed to delete post images', err)));
+				}
+
+				await env.forum_db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
+				
+				await security.logAudit(userPayload.id, 'DELETE_POST', 'post', id, {}, request);
+				return jsonResponse({ success: true });
+			} catch (e) {
+				return handleError(e);
 			}
 		}
 
@@ -1140,7 +1528,7 @@ export default {
 			const postId = url.pathname.split('/')[3];
 			try {
 				const { results } = await env.forum_db.prepare(
-					`SELECT comments.*, users.username, users.nickname, users.avatar_url, users.role 
+					`SELECT comments.*, users.username, users.avatar_url, users.role 
                      FROM comments 
                      JOIN users ON comments.author_id = users.id 
                      WHERE post_id = ? 
@@ -1148,7 +1536,7 @@ export default {
 				).bind(postId).all();
 				return jsonResponse(results);
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -1169,9 +1557,27 @@ export default {
 				// user_id comes from token now
 				
 				if (!content) return jsonResponse({ error: 'Missing parameters' }, 400);
-				if (!content.trim()) return jsonResponse({ error: 'Comment cannot be empty' }, 400);
+				
+				// --- Input Sanitization & Validation (Sync with Frontend) ---
+				// 1. Visually Empty Check
+				if (isVisuallyEmpty(content)) return jsonResponse({ error: 'Comment cannot be empty' }, 400);
+				
+				// 2. Invisible Characters Check
+				if (hasInvisibleCharacters(content)) return jsonResponse({ error: 'Comment contains invalid invisible characters' }, 400);
+				
+				// 3. Length Check
 				if (content.length > 3000) return jsonResponse({ error: 'Comment too long (Max 3000 chars)' }, 400);
+				
+				// 4. Control Characters Check
 				if (hasControlCharacters(content)) return jsonResponse({ error: 'Comment contains invalid control characters' }, 400);
+
+				// 5. HTML Escape (Basic XSS Prevention - though we use textContent in DB, escaping here is safer)
+				content = content
+					.replace(/&/g, '&amp;')
+					.replace(/</g, '&lt;')
+					.replace(/>/g, '&gt;')
+					.replace(/"/g, '&quot;')
+					.replace(/'/g, '&#039;');
 				
 				// "Reply to Reply" Logic: Flatten to Level 2 with @Mention
 				let originalParentAuthorId = null; // Track who was *originally* replied to for notifications
@@ -1182,9 +1588,9 @@ export default {
 					if (parent) {
 						if (parent.parent_id !== null) {
 							// Level 3 attempt detected.
-							// 1. Fetch nickname of the user being replied to
-							const targetUser = await env.forum_db.prepare('SELECT username, nickname FROM users WHERE id = ?').bind(parent.author_id).first();
-							const targetName = targetUser.nickname || targetUser.username;
+							// 1. Fetch username of the user being replied to
+							const targetUser = await env.forum_db.prepare('SELECT username FROM users WHERE id = ?').bind(parent.author_id).first();
+							const targetName = targetUser.username;
 
 							// 2. Rewrite content and parent_id
 							content = `@${targetName} ${content}`;
@@ -1211,8 +1617,8 @@ export default {
 					).bind(postId).first();
 
 					// Fetch commenter name
-					const commenter = await env.forum_db.prepare('SELECT username, nickname FROM users WHERE id = ?').bind(userPayload.id).first();
-					const commenterName = commenter.nickname || commenter.username;
+					const commenter = await env.forum_db.prepare('SELECT username FROM users WHERE id = ?').bind(userPayload.id).first();
+					const commenterName = commenter.username;
 					const postUrl = `https://i.2x.nz/posts/${postId}`;
 
 					// Notify Post Author (if not self)
@@ -1239,7 +1645,7 @@ export default {
 
 						if (notifyUserId) {
 							const parentCommentUser = await env.forum_db.prepare(
-								'SELECT email, email_notifications, username, nickname FROM users WHERE id = ?'
+								'SELECT email, email_notifications, username FROM users WHERE id = ?'
 							).bind(notifyUserId).first();
 
 							if (parentCommentUser && notifyUserId !== userPayload.id && parentCommentUser.email_notifications === 1) {
@@ -1261,7 +1667,34 @@ export default {
 
 				return jsonResponse({ success }, 201);
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
+			}
+		}
+
+		// DELETE /api/comments/:id
+		if (url.pathname.match(/^\/api\/comments\/\d+$/) && method === 'DELETE') {
+			const id = url.pathname.split('/').pop();
+			try {
+				const userPayload = await authenticate(request);
+				
+				// Fetch comment to check ownership
+				const comment = await env.forum_db.prepare('SELECT author_id FROM comments WHERE id = ?').bind(id).first();
+				
+				if (!comment) return jsonResponse({ error: 'Comment not found' }, 404);
+
+				// Allow deletion if user is author OR admin
+				if (comment.author_id !== userPayload.id && userPayload.role !== 'admin') {
+					return jsonResponse({ error: 'Unauthorized' }, 403);
+				}
+
+				// Delete the comment AND its children (orphans prevention)
+				await env.forum_db.prepare('DELETE FROM comments WHERE parent_id = ?').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM comments WHERE id = ?').bind(id).run();
+				
+				await security.logAudit(userPayload.id, 'DELETE_COMMENT', 'comment', id, {}, request);
+				return jsonResponse({ success: true });
+			} catch (e) {
+				return handleError(e);
 			}
 		}
 
@@ -1285,23 +1718,22 @@ export default {
 					return jsonResponse({ liked: true });
 				}
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 		
 		// GET /api/posts/:id/like-status
 		if (url.pathname.match(/^\/api\/posts\/\d+\/like-status$/) && method === 'GET') {
 			const postId = url.pathname.split('/')[3];
-			const userId = url.searchParams.get('user_id');
-			if (!userId) return jsonResponse({ liked: false });
 			
 			try {
+				const userPayload = await authenticate(request);
 				const existing = await env.forum_db.prepare(
 					'SELECT id FROM likes WHERE post_id = ? AND user_id = ?'
-				).bind(postId, userId).first();
+				).bind(postId, userPayload.id).first();
 				return jsonResponse({ liked: !!existing });
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
@@ -1317,19 +1749,39 @@ export default {
 					return jsonResponse({ error: 'Turnstile verification failed' }, 403);
 				}
 
-				const { title, content, category_id } = body;
+				const { title, content: rawContent, category_id } = body;
+				let content = rawContent;
 				
 				if (!title || !content) {
 					return jsonResponse({ error: 'Missing title or content' }, 400);
 				}
 				
-				if (!title.trim() || !content.trim()) return jsonResponse({ error: 'Title or content cannot be empty' }, 400);
+				// --- Input Sanitization & Validation (Sync with Frontend) ---
+				if (isVisuallyEmpty(title) || isVisuallyEmpty(content)) return jsonResponse({ error: 'Title or content cannot be empty' }, 400);
 				
+				if (hasInvisibleCharacters(title) || hasInvisibleCharacters(content)) return jsonResponse({ error: 'Title or content contains invalid invisible characters' }, 400);
+
 				// Validate Lengths
 				if (title.length > 30) return jsonResponse({ error: 'Title too long (Max 30 chars)' }, 400);
 				if (content.length > 3000) return jsonResponse({ error: 'Content too long (Max 3000 chars)' }, 400);
 
 				if (hasControlCharacters(title) || hasControlCharacters(content)) return jsonResponse({ error: 'Title or content contains invalid control characters' }, 400);
+
+				// HTML Escape Content (Backend Enforcement)
+				content = content
+					.replace(/&/g, '&amp;')
+					.replace(/</g, '&lt;')
+					.replace(/>/g, '&gt;')
+					.replace(/"/g, '&quot;')
+					.replace(/'/g, '&#039;');
+				
+				// Escape Title as well just in case
+				const safeTitle = title
+					.replace(/&/g, '&amp;')
+					.replace(/</g, '&lt;')
+					.replace(/>/g, '&gt;')
+					.replace(/"/g, '&quot;')
+					.replace(/'/g, '&#039;');
 
 				// Validate Category
 				if (category_id) {
@@ -1339,13 +1791,13 @@ export default {
 
 				const { success } = await env.forum_db.prepare(
 					'INSERT INTO posts (author_id, title, content, category_id) VALUES (?, ?, ?, ?)'
-				).bind(userPayload.id, title, content, category_id || null).run();
+				).bind(userPayload.id, safeTitle.trim(), content.trim(), category_id || null).run();
 				
-				await security.logAudit(userPayload.id, 'CREATE_POST', 'post', 'new', { title_length: title.length }, request);
+				await security.logAudit(userPayload.id, 'CREATE_POST', 'post', 'new', { title_length: safeTitle.length }, request);
 
 				return jsonResponse({ success }, 201);
 			} catch (e) {
-				return jsonResponse({ error: String(e) }, 500);
+				return handleError(e);
 			}
 		}
 
