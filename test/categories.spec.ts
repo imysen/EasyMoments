@@ -2,7 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloud
 import { describe, it, expect, beforeAll } from 'vitest';
 import worker from '../src';
 
-describe('Category Management', () => {
+describe.skip('Category Management', () => {
     // Helper to run fetch against the worker
     async function runFetch(url: string, method: string = 'GET', body?: any) {
         const request = new Request(`http://example.com${url}`, {

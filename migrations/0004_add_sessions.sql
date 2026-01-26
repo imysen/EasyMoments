@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS sessions (
+  jti TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);

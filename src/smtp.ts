@@ -1,6 +1,8 @@
 
 import { connect } from 'cloudflare:sockets';
 
+const DEFAULT_FROM_NAME = '论坛管理员';
+
 const SMTP_CONFIG = {
     hostname: 'smtp.exmail.qq.com',
     port: 465,
@@ -147,7 +149,7 @@ async function sendViaSMTP(to: string, subject: string, htmlContent: string) {
         // IMPORTANT: SMTP requires CRLF (\r\n) for line breaks
         // Added Message-ID and Date headers to comply with stricter spam filters (like Cloudflare Email Routing)
         const message = 
-`From: Forum Admin <${SMTP_CONFIG.user}>
+`From: ${encodeHeader(DEFAULT_FROM_NAME)} <${SMTP_CONFIG.user}>
 To: ${to}
 Subject: ${encodedSubject}
 Date: ${date}
@@ -189,7 +191,7 @@ ${htmlContent}
 // Resend API Send Function
 async function sendViaResend(env: any, to: string, subject: string, htmlContent: string) {
     if (!env.RESEND_KEY) {
-        throw new Error('RESEND_KEY is missing in env');
+        throw new Error('环境变量缺少 RESEND_KEY');
     }
     
     console.log('[Resend] Sending email via API...');
@@ -200,7 +202,7 @@ async function sendViaResend(env: any, to: string, subject: string, htmlContent:
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            from: `Forum Admin <${env.RESEND_SEND || 'onboarding@resend.dev'}>`,
+            from: `${DEFAULT_FROM_NAME} <${env.RESEND_SEND || 'onboarding@resend.dev'}>`,
             to: [to],
             subject: subject,
             html: htmlContent,
@@ -210,7 +212,7 @@ async function sendViaResend(env: any, to: string, subject: string, htmlContent:
     if (!res.ok) {
         const err = await res.text();
         console.error('[Resend] API Error:', err);
-        throw new Error(`Resend API Error: ${err}`);
+        throw new Error(`Resend API 错误：${err}`);
     } else {
         console.log('[Resend] Email sent successfully');
     }
@@ -220,7 +222,7 @@ async function sendViaResend(env: any, to: string, subject: string, htmlContent:
 export async function sendEmail(to: string, subject: string, htmlContent: string, env?: any) {
     // 1. Check MX Records first
     if (!(await checkMX(to))) {
-        throw new Error(`Invalid email domain (No MX records found for ${to})`);
+        throw new Error(`邮箱域名无效（未找到 MX 记录：${to}）`);
     }
 
     // Try Resend if configured

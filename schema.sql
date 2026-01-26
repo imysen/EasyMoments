@@ -40,6 +40,7 @@ CREATE TABLE posts (
   content TEXT NOT NULL,
   category_id INTEGER,
   is_pinned INTEGER DEFAULT 0,
+  view_count INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (author_id) REFERENCES users(id),
   FOREIGN KEY (category_id) REFERENCES categories(id)
@@ -75,6 +76,14 @@ CREATE TABLE settings (
 CREATE TABLE nonces (
   nonce TEXT PRIMARY KEY,
   expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE sessions (
+  jti TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
 CREATE TABLE audit_logs (

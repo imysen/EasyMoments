@@ -53,6 +53,10 @@ build/Release
 node_modules/
 jspm_packages/
 
+.dev.vars
+.env
+.env.*
+
 # Snowpack dependency directory (https://snowpack.dev/)
 
 web_modules/

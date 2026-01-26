@@ -4,7 +4,6 @@ import { generateIdenticon } from './identicon';
 import { uploadImage, deleteImage, listAllKeys, getPublicUrl, S3Env } from './s3';
 import * as OTPAuth from 'otpauth';
 import { Security, UserPayload } from './security';
-import html from '../public/index.html';
 
 // Utility to extract image URLs from Markdown content
 function extractImageUrls(content: string): string[] {
@@ -93,7 +92,6 @@ export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		const url = new URL(request.url);
 		const method = request.method;
-		const security = new Security(env);
 
 		// CORS headers helper
 		const corsHeaders = {
@@ -107,6 +105,16 @@ export default {
 			return new Response(null, {
 				headers: corsHeaders,
 			});
+		}
+
+		let security: Security;
+		try {
+			security = new Security(env);
+		} catch {
+			return Response.json(
+				{ error: 'Server misconfigured' },
+				{ status: 500, headers: corsHeaders }
+			);
 		}
 
 		// Helper to return JSON response with CORS
@@ -335,12 +343,13 @@ export default {
 					}
 				}
 
-				const token = await security.generateToken({
+				const { token, jti, expiresAt } = await security.generateToken({
 					id: user.id,
 					role: user.role || 'user',
 					email: user.email
 				});
 
+				await env.forum_db.prepare('INSERT INTO sessions (jti, user_id, expires_at) VALUES (?, ?, ?)').bind(jti, user.id, expiresAt).run();
 				await security.logAudit(user.id, 'LOGIN', 'user', String(user.id), { email }, request);
 
 				return jsonResponse({
@@ -606,7 +615,7 @@ export default {
 
 				// Base URL logic: Use env var or default to request origin, but override for prod if needed
 				const baseUrl = 'https://i.2x.nz'; // Hardcoded as requested
-				const resetLink = `${baseUrl}/?reset_token=${token}`;
+				const resetLink = `${baseUrl}/reset?token=${token}`;
 				
 				const emailHtml = `
 					<h1>密码重置请求</h1>
@@ -988,7 +997,7 @@ export default {
 				
 				await security.logAudit(userPayload.id, 'RESEND_VERIFY_EMAIL', 'user', id, {}, request);
 
-				return jsonResponse({ success: true, message: 'Verification email sent' });
+				return jsonResponse({ success: true, message: '验证邮件已发送' });
 			} catch (e) {
 				return handleError(e);
 			}
@@ -1220,13 +1229,13 @@ export default {
 			try {
 				const body = await request.json() as any;
 				const { to } = body;
-				if (!to) return jsonResponse({ error: 'Missing to address' }, 400);
+				if (!to) return jsonResponse({ error: '缺少收件人地址' }, 400);
 
 				console.log('[DEBUG] Starting test email to:', to);
-				await sendEmail(to, 'Test Email', '<h1>Hello</h1><p>This is a test.</p>');
+				await sendEmail(to, '测试邮件', '<h1>你好</h1><p>这是一封测试邮件。</p>');
 				console.log('[DEBUG] Test email sent successfully');
 				
-				return jsonResponse({ success: true, message: 'Email sent' });
+				return jsonResponse({ success: true, message: '邮件已发送' });
 			} catch (e) {
 				console.error('[DEBUG] Test email failed:', e);
 				return handleError(e);
@@ -1285,7 +1294,7 @@ export default {
 					await sendEmail(email, '请验证您的邮箱', emailHtml);
 				} catch (e) {
 					console.error('[Registration Email Error]', e);
-					return jsonResponse({ error: 'Failed to send verification email. Please check your email address.' }, 400);
+					return jsonResponse({ error: '验证邮件发送失败，请检查邮箱地址是否正确。' }, 400);
 				}
 
 				const { success, meta } = await env.forum_db.prepare(
@@ -1307,7 +1316,7 @@ export default {
 					}
 				}
 
-				return jsonResponse({ success, message: 'User registered successfully. Please check your email to verify your account.' }, 201);
+				return jsonResponse({ success, message: '注册成功，请前往邮箱完成验证。' }, 201);
 			} catch (e: any) {
 				if (e.message && e.message.includes('UNIQUE constraint failed')) {
 					return jsonResponse({ error: 'Email already exists' }, 409);
@@ -1320,7 +1329,7 @@ export default {
 		if (url.pathname === '/api/verify' && method === 'GET') {
 			const token = url.searchParams.get('token');
 			if (!token) {
-				return new Response('Missing token', { status: 400 });
+				return new Response('缺少 token', { status: 400 });
 			}
 
 			try {
@@ -1332,10 +1341,10 @@ export default {
 					// Redirect to home page with verified param
 					return Response.redirect(`https://i.2x.nz/?verified=true`, 302);
 				} else {
-					return new Response('Invalid or expired token', { status: 400 });
+					return new Response('token 无效或已过期', { status: 400 });
 				}
 			} catch (e) {
-				return new Response('Verification failed', { status: 500 });
+				return new Response('验证失败', { status: 500 });
 			}
 		}
 
@@ -1368,6 +1377,10 @@ export default {
 				const limit = parseInt(url.searchParams.get('limit') || '20');
 				const offset = parseInt(url.searchParams.get('offset') || '0');
 				const categoryId = url.searchParams.get('category_id');
+				const q = (url.searchParams.get('q') || url.searchParams.get('query') || '').trim();
+				const sortByRaw = (url.searchParams.get('sort_by') || 'time').trim().toLowerCase();
+				const sortDirRaw = (url.searchParams.get('sort_dir') || 'desc').trim().toLowerCase();
+				const sortDir = sortDirRaw === 'asc' ? 'ASC' : 'DESC';
 				
 				let query = `SELECT 
                         posts.*, 
@@ -1385,20 +1398,40 @@ export default {
 
                 const params: any[] = [];
                 const countParams: any[] = [];
+				const conditions: string[] = [];
 
                 if (categoryId) {
                     if (categoryId === 'uncategorized') {
-                        query += ` WHERE posts.category_id IS NULL`;
-                        countQuery += ` WHERE category_id IS NULL`;
+						conditions.push(`posts.category_id IS NULL`);
                     } else {
-                        query += ` WHERE posts.category_id = ?`;
-                        countQuery += ` WHERE category_id = ?`;
+						conditions.push(`posts.category_id = ?`);
                         params.push(categoryId);
                         countParams.push(categoryId);
                     }
                 }
 
-                query += ` ORDER BY is_pinned DESC, posts.created_at DESC LIMIT ? OFFSET ?`;
+				if (q) {
+					conditions.push(`(posts.title LIKE ? OR posts.content LIKE ?)`);
+					const like = `%${q}%`;
+					params.push(like, like);
+					countParams.push(like, like);
+				}
+
+				if (conditions.length) {
+					query += ` WHERE ${conditions.join(' AND ')}`;
+					countQuery += ` WHERE ${conditions.join(' AND ')}`;
+				}
+
+				const sortExpr =
+					sortByRaw === 'likes'
+						? `like_count ${sortDir}`
+						: sortByRaw === 'comments'
+							? `comment_count ${sortDir}`
+							: sortByRaw === 'views'
+								? `posts.view_count ${sortDir}`
+								: `posts.created_at ${sortDir}`;
+
+                query += ` ORDER BY is_pinned DESC, ${sortExpr}, posts.created_at DESC LIMIT ? OFFSET ?`;
                 params.push(limit, offset);
 				
 				const [postsResult, countResult] = await Promise.all([
@@ -1435,6 +1468,11 @@ export default {
 				).bind(postId).first();
 				
 				if (!post) return jsonResponse({ error: 'Post not found' }, 404);
+
+				try {
+					await env.forum_db.prepare('UPDATE posts SET view_count = COALESCE(view_count, 0) + 1 WHERE id = ?').bind(postId).run();
+					(post as any).view_count = Number((post as any).view_count || 0) + 1;
+				} catch {}
 				
 				// Check like status if user_id provided
 				const userId = url.searchParams.get('user_id');
@@ -1806,11 +1844,43 @@ export default {
 			}
 		}
 
-		// SPA Fallback
 		if (method === 'GET' && !url.pathname.startsWith('/api')) {
-			return new Response(html, {
-				headers: { 'Content-Type': 'text/html' }
-			});
+			const pathname = url.pathname;
+			const postMatch = pathname.match(/^\/posts\/(\d+)$/);
+			if (postMatch) {
+				const redirectUrl = new URL(request.url);
+				redirectUrl.pathname = '/post';
+				redirectUrl.search = `?id=${postMatch[1]}`;
+				return Response.redirect(redirectUrl.toString(), 302);
+			}
+			const postAltMatch = pathname.match(/^\/post\/(\d+)$/);
+			if (postAltMatch) {
+				const redirectUrl = new URL(request.url);
+				redirectUrl.pathname = '/post';
+				redirectUrl.search = `?id=${postAltMatch[1]}`;
+				return Response.redirect(redirectUrl.toString(), 302);
+			}
+
+			if (!(env as any).ASSETS?.fetch) return new Response('Not Found', { status: 404 });
+			const mapped =
+				pathname === '/login' ? '/login.html' :
+				pathname === '/register' ? '/register.html' :
+				pathname === '/forgot' ? '/forgot.html' :
+				pathname === '/reset' ? '/reset.html' :
+				pathname === '/settings' ? '/settings.html' :
+				pathname === '/admin' ? '/admin.html' :
+				pathname === '/post' ? '/post.html' :
+				pathname;
+
+			const assetUrl = new URL(request.url);
+			assetUrl.pathname = mapped;
+			const assetRes = await env.ASSETS.fetch(new Request(assetUrl, request));
+			if (assetRes.status !== 404) return assetRes;
+			if (mapped !== pathname) {
+				const directRes = await env.ASSETS.fetch(request);
+				if (directRes.status !== 404) return directRes;
+			}
+			return new Response('Not Found', { status: 404 });
 		}
 
 		return new Response('Not Found', { status: 404 });

@@ -1,41 +1,22 @@
-import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
+import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { beforeAll, describe, it, expect } from 'vitest';
 import worker from '../src';
 
-describe('Hello World user worker', () => {
-	describe('request for /message', () => {
-		it('/ responds with "Hello, World!" (unit style)', async () => {
-			const request = new Request<unknown, IncomingRequestCfProperties>('http://example.com/message');
-			// Create an empty context to pass to `worker.fetch()`.
-			const ctx = createExecutionContext();
-			const response = await worker.fetch(request, env, ctx);
-			// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-			await waitOnExecutionContext(ctx);
-			expect(await response.text()).toMatchInlineSnapshot(`"Hello, World!"`);
-		});
-
-		it('responds with "Hello, World!" (integration style)', async () => {
-			const request = new Request('http://example.com/message');
-			const response = await SELF.fetch(request);
-			expect(await response.text()).toMatchInlineSnapshot(`"Hello, World!"`);
-		});
+describe('Worker API smoke tests', () => {
+	beforeAll(async () => {
+		await env.forum_db.prepare('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)').run();
+		await env.forum_db.prepare('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, username TEXT, password TEXT)').run();
+		await env.forum_db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('turnstile_enabled', '0')").run();
 	});
 
-	describe('request for /random', () => {
-		it('/ responds with a random UUID (unit style)', async () => {
-			const request = new Request<unknown, IncomingRequestCfProperties>('http://example.com/random');
-			// Create an empty context to pass to `worker.fetch()`.
-			const ctx = createExecutionContext();
-			const response = await worker.fetch(request, env, ctx);
-			// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-			await waitOnExecutionContext(ctx);
-			expect(await response.text()).toMatch(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/);
-		});
-
-		it('responds with a random UUID (integration style)', async () => {
-			const request = new Request('http://example.com/random');
-			const response = await SELF.fetch(request);
-			expect(await response.text()).toMatch(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/);
-		});
+	it('GET /api/config returns expected shape', async () => {
+		const request = new Request('http://example.com/api/config', { method: 'GET' });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+		const data = await response.json();
+		expect(typeof data.turnstile_enabled).toBe('boolean');
+		expect(typeof data.turnstile_site_key).toBe('string');
 	});
 });

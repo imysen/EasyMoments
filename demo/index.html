@@ -1,0 +1,2011 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <link rel="icon" href="https://q2.qlogo.cn/headimg_dl?dst_uin=2726730791&spec=0">
+    <meta charset="UTF-8">
+    <meta name="referrer" content="no-referrer"> 
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloudflare D1 Forum</title>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- Marked for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- DOMPurify for sanitization -->
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+    <!-- QR Code Generator -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+    <!-- Browser Image Compression -->
+    <script src="https://cdn.jsdelivr.net/npm/browser-image-compression@2.0.2/dist/browser-image-compression.js"></script>
+    <!-- FancyBox -->
+    <script src="https://cdn.jsdelivr.net/npm/@fancyapps/ui@5.0/dist/fancybox/fancybox.umd.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fancyapps/ui@5.0/dist/fancybox/fancybox.css" />
+    <!-- Cloudflare Turnstile -->
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
+    <style>
+        .prose { word-wrap: break-word; overflow-wrap: break-word; }
+        .prose a { word-break: break-all; }
+        .prose pre { white-space: pre-wrap; word-break: break-all; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div id="app" class="container mx-auto p-4">
+        <!-- Header -->
+        <header class="flex justify-between items-center mb-8 bg-white p-4 rounded shadow">
+            <h1 class="text-2xl font-bold text-gray-800 cursor-pointer" @click="goHome">D1 Forum</h1>
+            <div>
+                <div v-if="currentUser" class="flex items-center gap-4">
+                    <button v-if="currentUser.role === 'admin'" @click="view = 'admin'" :class="view === 'admin' ? 'text-blue-800 font-bold' : 'text-blue-600'" class="hover:text-blue-800">管理后台</button>
+                    <button @click="view = 'settings'" :class="view === 'settings' ? 'text-blue-800 font-bold' : 'text-blue-600'" class="hover:text-blue-800">设置</button>
+                    <div class="flex items-center gap-2">
+                         <img :src="currentUser.avatar_url || 'https://via.placeholder.com/32'" alt="加载失败" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-cover border">
+                         <span class="text-gray-600">欢迎, {{ currentUser.username }}</span>
+                    </div>
+                    <button @click="logout" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">退出</button>
+                </div>
+                <div v-else class="flex gap-2">
+                    <button @click="showLoginForm" class="text-blue-600 hover:text-blue-800 px-4 py-2">登录</button>
+                    <button @click="showRegisterForm" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">注册</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Verification Alert -->
+        <div v-if="verificationMessage" class="max-w-md mx-auto bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4">
+            {{ verificationMessage }}
+        </div>
+
+        <!-- Auth Forms (Login / Register / Forgot / Reset) -->
+        <div v-if="!currentUser && (view === 'login' || view === 'register' || view === 'forgot' || view === 'reset')" class="max-w-md mx-auto bg-white p-6 rounded shadow mb-8 mt-8">
+            <h2 class="text-xl font-bold mb-4">
+                {{ view === 'login' ? '登录' : (view === 'register' ? '注册' : (view === 'forgot' ? '忘记密码' : '重置密码')) }}
+            </h2>
+            
+            <!-- Forgot Password Form -->
+            <form v-if="view === 'forgot'" @submit.prevent="handleForgot" class="space-y-4">
+                <div v-if="error" class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative">{{ error }}</div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">邮箱</label>
+                    <input v-model="form.email" type="email" class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                </div>
+                <!-- Turnstile -->
+                <div id="auth-turnstile" class="my-4"></div>
+
+                <button type="submit" :disabled="loading" class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 disabled:opacity-50">
+                    {{ loading ? '发送中...' : '发送重置链接' }}
+                </button>
+                <div class="text-center text-sm text-gray-600 mt-4">
+                    <a href="#" @click.prevent="showLoginForm" class="text-blue-500 hover:underline">返回登录</a>
+                </div>
+            </form>
+
+            <!-- Reset Password Form -->
+            <form v-else-if="view === 'reset'" @submit.prevent="handleReset" class="space-y-4">
+                <div v-if="error" class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative">{{ error }}</div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">新密码</label>
+                    <input v-model="form.password" type="password" class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                </div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">双重验证码 (若开启)</label>
+                    <input v-model="form.totp_code" type="text" placeholder="选填" class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500" maxlength="6">
+                </div>
+                <!-- Turnstile -->
+                <div id="auth-turnstile" class="my-4"></div>
+                
+                <button type="submit" :disabled="loading" class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 disabled:opacity-50">
+                    {{ loading ? '处理中...' : '重置密码' }}
+                </button>
+            </form>
+
+            <!-- Login / Register Form -->
+            <form v-else @submit.prevent="view === 'login' ? handleLogin() : handleRegister()" class="space-y-4">
+                <div v-if="error" class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative">
+                    {{ error }}
+                </div>
+
+                <div v-if="view === 'register'">
+                    <label class="block text-gray-700 text-sm font-bold mb-2">用户名 (最多 20 字符)</label>
+                    <input v-model="form.username" type="text" class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500" maxlength="20" required>
+                </div>
+
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">邮箱</label>
+                    <input v-model="form.email" type="email" class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                </div>
+
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">密码</label>
+                    <input v-model="form.password" type="password" class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                </div>
+
+                <!-- TOTP Input for Login -->
+                <div v-if="view === 'login'">
+                    <label class="block text-gray-700 text-sm font-bold mb-2">双重验证码 (若开启)</label>
+                    <input v-model="form.totp_code" type="text" placeholder="选填" class="w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500" maxlength="6" pattern="\d*">
+                </div>
+
+                <!-- Turnstile -->
+                <div id="auth-turnstile" class="my-4"></div>
+
+                <button type="submit" :disabled="loading" class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 disabled:opacity-50">
+                    {{ loading ? '处理中...' : (view === 'login' ? '登录' : '注册') }}
+                </button>
+
+                <div class="text-center text-sm text-gray-600 mt-4 flex justify-between">
+                    <a href="#" @click.prevent="toggleAuthMode" class="text-blue-500 hover:underline">
+                        {{ view === 'login' ? '没有账号？注册' : '已有账号？登录' }}
+                    </a>
+                    <a v-if="view === 'login'" href="#" @click.prevent="showForgotForm" class="text-gray-500 hover:underline">忘记密码？</a>
+                </div>
+            </form>
+        </div>
+
+        <!-- User Settings (TOTP & Email) -->
+        <main v-if="currentUser && view === 'settings'" class="max-w-2xl mx-auto bg-white p-8 rounded shadow space-y-8">
+            <h2 class="text-2xl font-bold mb-6">用户设置</h2>
+
+            <!-- Profile Settings -->
+            <div>
+                <h3 class="text-xl font-bold mb-4">个人资料</h3>
+                <div class="space-y-4">
+                    <div class="flex items-center gap-4">
+                        <img :src="profileForm.avatar_url || 'https://via.placeholder.com/100'" alt="加载失败" referrerpolicy="no-referrer" class="w-20 h-20 rounded-full object-cover border">
+                        <div>
+                            <label class="block text-gray-700 text-sm font-bold mb-2">头像</label>
+                            <input type="file" @change="uploadAvatar" accept="image/*" class="text-sm mb-2">
+                            <div class="text-xs text-gray-500 mb-1">或输入图片 URL:</div>
+                            <input v-model="profileForm.avatar_url" type="text" class="w-full px-3 py-2 border rounded text-sm" placeholder="https://example.com/avatar.jpg">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 text-sm font-bold mb-2">用户名</label>
+                        <input v-model="profileForm.username" type="text" class="w-full px-3 py-2 border rounded" placeholder="用户名" maxlength="20">
+                    </div>
+                    <div>
+                         <label class="flex items-center gap-2 cursor-pointer">
+                             <input type="checkbox" v-model="profileForm.email_notifications" class="form-checkbox h-5 w-5 text-blue-600">
+                             <span class="text-gray-700 font-medium">接收邮件通知 (仅限评论)</span>
+                         </label>
+                    </div>
+                    <button @click="saveProfile" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">保存资料</button>
+                </div>
+            </div>
+            
+            <div class="border-t pt-6">
+                <h3 class="text-xl font-bold mb-4">修改邮箱</h3>
+                <div class="flex gap-4 items-end">
+                    <div class="flex-1">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">新邮箱地址</label>
+                        <input v-model="emailChange.newEmail" type="email" class="w-full px-3 py-2 border rounded">
+                    </div>
+                    <div class="w-32" v-if="currentUser.totp_enabled">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">双重验证码</label>
+                        <input v-model="emailChange.code" type="text" class="w-full px-3 py-2 border rounded" maxlength="6">
+                    </div>
+                    <button @click="requestEmailChange" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 h-10">更新</button>
+                </div>
+                <p class="text-sm text-gray-500 mt-2">确认链接将发送到新邮箱。</p>
+            </div>
+
+            <div class="border-t pt-6">
+                <h3 class="text-xl font-bold mb-4">双重验证 (2FA)</h3>
+                <!-- (TOTP Logic same as before) -->
+                <div v-if="currentUser.totp_enabled">
+                    <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
+                        ✅ 2FA 当前 <strong>已启用</strong>。
+                    </div>
+                    <p class="text-gray-600">您的账户很安全。登录时将需要输入验证码。</p>
+                </div>
+                
+                <div v-else>
+                    <p class="text-gray-600 mb-4">启用 2FA 以保护您的账户。您需要使用 Google Authenticator 或 Authy 等验证器应用。</p>
+                    <button v-if="!totpSetup.secret" @click="startTotpSetup" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">启用 2FA</button>
+                    <div v-if="totpSetup.secret" class="mt-6 bg-gray-50 p-6 rounded border">
+                        <h4 class="font-bold mb-2">1. 扫描此二维码</h4>
+                        <div class="mb-4"><canvas id="qrcode-canvas"></canvas></div>
+                        <p class="text-sm text-gray-500 mb-4">或手动输入密钥: <code class="bg-gray-200 px-1 rounded">{{ totpSetup.secret }}</code></p>
+                        <h4 class="font-bold mb-2">2. 输入验证码</h4>
+                        <div class="flex gap-2">
+                            <input v-model="totpSetup.code" type="text" placeholder="000000" class="px-3 py-2 border rounded w-32" maxlength="6">
+                            <button @click="verifyTotpSetup" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">验证并启用</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Delete Account -->
+            <div class="border-t pt-6">
+                <h3 class="text-xl font-bold mb-4 text-red-600">危险区域</h3>
+                <div class="bg-red-50 p-4 rounded border border-red-200">
+                    <h4 class="font-bold mb-2 text-red-800">删除账号</h4>
+                    <p class="text-sm text-red-600 mb-4">一旦删除账号，将无法恢复。请三思。</p>
+                    <div class="space-y-3">
+                        <input v-model="deleteAccountForm.password" type="password" placeholder="输入您的密码" class="w-full px-3 py-2 border rounded">
+                        <input v-if="currentUser.totp_enabled" v-model="deleteAccountForm.totp_code" type="text" placeholder="输入 2FA 验证码" class="w-full px-3 py-2 border rounded" maxlength="6">
+                        <button @click="deleteAccount" class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">删除账号</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Admin Dashboard -->
+        <main v-if="currentUser && view === 'admin'" class="space-y-6">
+            <h2 class="text-2xl font-bold mb-4">管理后台</h2>
+            <!-- Stats -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                <div class="bg-white p-6 rounded shadow border-l-4 border-blue-500">
+                    <h3 class="text-gray-500 text-sm uppercase">用户总数</h3>
+                    <p class="text-3xl font-bold">{{ adminStats.users }}</p>
+                </div>
+                <div class="bg-white p-6 rounded shadow border-l-4 border-green-500">
+                    <h3 class="text-gray-500 text-sm uppercase">帖子总数</h3>
+                    <p class="text-3xl font-bold">{{ adminStats.posts }}</p>
+                </div>
+                <div class="bg-white p-6 rounded shadow border-l-4 border-purple-500">
+                    <h3 class="text-gray-500 text-sm uppercase">评论总数</h3>
+                    <p class="text-3xl font-bold">{{ adminStats.comments }}</p>
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div class="bg-white p-6 rounded shadow">
+                <h3 class="text-xl font-bold mb-4">站点设置</h3>
+                <div class="space-y-4">
+                    <!-- Turnstile -->
+                    <label class="flex items-center cursor-pointer">
+                        <div class="relative">
+                            <input type="checkbox" v-model="systemSettings.turnstile_enabled" class="sr-only" @change="saveSettings">
+                            <div class="block bg-gray-200 w-14 h-8 rounded-full"></div>
+                            <div class="dot absolute left-1 top-1 bg-white w-6 h-6 rounded-full transition" :class="{'transform translate-x-6': systemSettings.turnstile_enabled}"></div>
+                        </div>
+                        <div class="ml-3 text-gray-700 font-medium">
+                            启用 Cloudflare Turnstile (人机验证)
+                        </div>
+                    </label>
+
+                    <h4 class="font-bold text-gray-700 mt-4 border-t pt-4">邮件通知设置</h4>
+                    <p class="text-sm text-gray-500 mb-2">配置当管理员执行操作时是否通知受影响的用户。</p>
+
+                    <label class="flex items-center cursor-pointer">
+                        <input type="checkbox" v-model="systemSettings.notify_on_user_delete" class="form-checkbox h-5 w-5 text-blue-600" @change="saveSettings">
+                        <span class="ml-2 text-gray-700">删除账号时通知用户</span>
+                    </label>
+
+                    <label class="flex items-center cursor-pointer">
+                        <input type="checkbox" v-model="systemSettings.notify_on_username_change" class="form-checkbox h-5 w-5 text-blue-600" @change="saveSettings">
+                        <span class="ml-2 text-gray-700">修改用户名时通知用户</span>
+                    </label>
+
+                    <label class="flex items-center cursor-pointer">
+                        <input type="checkbox" v-model="systemSettings.notify_on_avatar_change" class="form-checkbox h-5 w-5 text-blue-600" @change="saveSettings">
+                        <span class="ml-2 text-gray-700">重置/修改头像时通知用户</span>
+                    </label>
+
+                    <label class="flex items-center cursor-pointer">
+                        <input type="checkbox" v-model="systemSettings.notify_on_manual_verify" class="form-checkbox h-5 w-5 text-blue-600" @change="saveSettings">
+                        <span class="ml-2 text-gray-700">手动验证通过时通知用户</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Category Management -->
+            <div class="bg-white p-6 rounded shadow">
+                <h3 class="text-xl font-bold mb-4">分类管理</h3>
+                <div class="flex gap-2 mb-4">
+                    <input v-model="adminCategoryForm.name" type="text" placeholder="分类名称" class="border px-3 py-2 rounded">
+                    <button @click="saveCategory" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+                        {{ adminCategoryForm.id ? '更新' : '添加' }}
+                    </button>
+                    <button v-if="adminCategoryForm.id" @click="adminCategoryForm.id = null; adminCategoryForm.name = ''" class="text-gray-500">取消</button>
+                </div>
+                <ul>
+                    <li v-for="cat in adminCategories" :key="cat.id" class="flex justify-between items-center border-b py-2 last:border-0">
+                        <span>{{ cat.name }}</span>
+                        <div class="flex gap-2">
+                            <button @click="editCategory(cat)" class="text-blue-600 text-sm">编辑</button>
+                            <button @click="deleteCategory(cat.id)" class="text-red-600 text-sm">删除</button>
+                        </div>
+                    </li>
+                </ul>
+                <div v-if="adminCategories.length === 0" class="text-gray-500 text-sm">暂无分类</div>
+            </div>
+
+            <!-- User Management -->
+            <div class="bg-white p-6 rounded shadow">
+                <h3 class="text-xl font-bold mb-4">用户管理</h3>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full table-auto">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-2 text-left">ID</th>
+                                <th class="px-4 py-2 text-left">头像</th>
+                                <th class="px-4 py-2 text-left">用户名</th>
+                                <th class="px-4 py-2 text-left">邮箱</th>
+                                <th class="px-4 py-2 text-left">角色</th>
+                                <th class="px-4 py-2 text-left">已验证</th>
+                                <th class="px-4 py-2 text-left">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="user in adminUsers" :key="user.id" class="border-b hover:bg-gray-50">
+                                <td class="px-4 py-2">{{ user.id }}</td>
+                                <td class="px-4 py-2">
+                                    <img :src="user.avatar_url || 'https://via.placeholder.com/32'" alt="加载失败" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-cover border">
+                                </td>
+                                <td class="px-4 py-2">{{ user.username }}</td>
+                                <td class="px-4 py-2">{{ user.email }}</td>
+                                <td class="px-4 py-2">
+                                    <span :class="user.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-800'" class="px-2 py-1 rounded text-xs">
+                                        {{ user.role }}
+                                    </span>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <span :class="user.verified ? 'text-green-600' : 'text-red-600'">
+                                        {{ user.verified ? '是' : '否' }}
+                                    </span>
+                                </td>
+                                <td class="px-4 py-2 flex gap-2">
+                                    <button @click="openAdminEdit(user)" class="text-blue-600 hover:text-blue-800 text-sm bg-blue-50 px-2 py-1 rounded">编辑</button>
+                                    <div v-if="!user.verified" class="flex gap-2">
+                                        <button @click="manualVerify(user.id)" class="text-green-600 hover:text-green-800 text-sm bg-green-50 px-2 py-1 rounded">验证</button>
+                                        <button @click="resendEmail(user.id)" class="text-blue-600 hover:text-blue-800 text-sm bg-blue-50 px-2 py-1 rounded">重发</button>
+                                    </div>
+                                    <button v-if="user.id !== currentUser.id" @click="deleteUser(user.id)" class="text-red-600 hover:text-red-800 text-sm bg-red-50 px-2 py-1 rounded">删除</button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- System Maintenance -->
+            <div class="bg-white p-6 rounded shadow">
+                <h3 class="text-xl font-bold mb-4">系统维护</h3>
+                <div class="space-y-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <h4 class="font-bold text-gray-700">孤立文件清理</h4>
+                            <p class="text-sm text-gray-500">扫描并删除未被使用的图片文件 (S3 Storage)</p>
+                        </div>
+                        <button @click="analyzeCleanup" :disabled="analyzing" class="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700 disabled:opacity-50">
+                            {{ analyzing ? '扫描中...' : '开始扫描' }}
+                        </button>
+                    </div>
+                    
+                    <div v-if="cleanupStats" class="bg-gray-50 p-4 rounded border">
+                        <div class="grid grid-cols-3 gap-4 text-center mb-4">
+                            <div>
+                                <div class="text-sm text-gray-500">总文件</div>
+                                <div class="text-xl font-bold">{{ cleanupStats.total_files }}</div>
+                            </div>
+                            <div>
+                                <div class="text-sm text-gray-500">使用中</div>
+                                <div class="text-xl font-bold text-green-600">{{ cleanupStats.used_files }}</div>
+                            </div>
+                            <div>
+                                <div class="text-sm text-gray-500">孤立文件</div>
+                                <div class="text-xl font-bold text-red-600">{{ cleanupStats.orphaned_files }}</div>
+                            </div>
+                        </div>
+                        <div v-if="cleanupStats.orphaned_files > 0" class="text-right">
+                             <button @click="executeCleanup" :disabled="analyzing" class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">
+                                立即清理
+                            </button>
+                        </div>
+                        <div v-else class="text-center text-green-600 text-sm">
+                            系统很干净，无需清理。
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Admin Edit Modal -->
+        <div v-if="adminEdit.user" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
+            <div class="bg-white rounded p-6 max-w-md w-full">
+                <h3 class="text-xl font-bold mb-4">编辑用户: {{ adminEdit.user.username }}</h3>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-bold mb-1">用户名 (最多 20 字符)</label>
+                        <input v-model="adminEdit.username" type="text" class="w-full border rounded px-3 py-2" maxlength="20">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-bold mb-1">邮箱</label>
+                        <input v-model="adminEdit.email" type="email" class="w-full border rounded px-3 py-2">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-bold mb-1">头像 URL</label>
+                        <div class="flex gap-2">
+                            <input v-model="adminEdit.avatar_url" type="text" class="w-full border rounded px-3 py-2" placeholder="https://...">
+                            <button type="button" @click="resetAvatar" class="bg-gray-200 px-3 py-2 rounded text-sm hover:bg-gray-300 whitespace-nowrap" title="重置为默认 (空)">
+                                重置默认
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-bold mb-1">新密码 (留空保持不变)</label>
+                        <input v-model="adminEdit.password" type="text" class="w-full border rounded px-3 py-2">
+                    </div>
+                    <div class="flex justify-end gap-2 mt-6">
+                        <button @click="adminEdit.user = null" class="text-gray-600 px-4 py-2">取消</button>
+                        <button @click="saveAdminEdit" class="bg-blue-600 text-white px-4 py-2 rounded">保存更改</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+                <!-- Post Detail View -->
+        <main v-if="view === 'post' && currentPost" class="max-w-4xl mx-auto space-y-6">
+             <div class="mb-4">
+                <button @click="goHome" class="text-blue-600 hover:underline flex items-center gap-1">
+                    <span>&larr;</span> 返回首页
+                </button>
+             </div>
+             <div class="bg-white p-6 rounded shadow relative">
+                <div v-if="currentUser && currentUser.role === 'admin'" class="absolute top-4 right-4 flex gap-2">
+                     <button @click="togglePin(currentPost)" class="text-sm" :class="currentPost.is_pinned ? 'text-green-600' : 'text-gray-400 hover:text-green-600'">
+                        {{ currentPost.is_pinned ? '取消置顶' : '置顶' }}
+                     </button>
+                     <select v-if="categories.length > 0" :value="currentPost.category_id || ''" @change="movePost(currentPost, $event.target.value)" class="text-xs border rounded px-1">
+                        <option value="">无分类</option>
+                        <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+                     </select>
+                     <button @click="deletePost(currentPost.id)" class="text-red-500 hover:text-red-700 text-sm">删除帖子</button>
+                </div>
+                <h1 class="text-3xl font-bold text-gray-800 mb-2">
+                    <span v-if="currentPost.is_pinned" class="text-green-600 mr-2">📌</span>
+                    {{ currentPost.title }}
+                </h1>
+                <div class="flex items-center gap-2 mb-6 border-b pb-4">
+                    <img :src="currentPost.author_avatar || 'https://via.placeholder.com/32'" alt="加载失败" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-cover border">
+                    <div class="text-sm">
+                        <p class="font-bold text-gray-700">
+                            {{ currentPost.author_name }}
+                            <span v-if="currentPost.author_role === 'admin'" class="bg-red-100 text-red-800 text-xs px-1.5 py-0.5 rounded ml-1 border border-red-200">管理员</span>
+                            <span v-if="currentPost.category_name" class="bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded-full ml-1 border border-blue-200 cursor-pointer" @click="view = 'home'; selectedCategory = currentPost.category_id; fetchPosts(0)">{{ currentPost.category_name }}</span>
+                            <button v-if="currentUser && (currentUser.id === currentPost.author_id || currentUser.role === 'admin')" @click="startEditPost(currentPost)" class="text-blue-500 text-xs ml-2 hover:underline">编辑</button>
+                            <button v-if="currentUser && currentUser.id === currentPost.author_id" @click="deletePost(currentPost.id)" class="text-red-500 text-xs ml-2 hover:underline">删除</button>
+                        </p>
+                        <p class="text-gray-500">{{ formatDate(currentPost.created_at) }}</p>
+                    </div>
+                </div>
+                <div class="prose max-w-none mb-8 break-words" v-html="renderMarkdown(currentPost.content)"></div>
+                
+                <!-- Actions -->
+                <div class="flex items-center gap-6 mt-4 pt-4 border-t text-sm text-gray-500">
+                    <button @click="toggleLike(currentPost)" class="flex items-center gap-1 hover:text-blue-600" :class="{'text-blue-600 font-bold': currentPost.liked}">
+                        <span>{{ currentPost.liked ? '👍 已赞' : '👍 点赞' }}</span>
+                        <span>({{ currentPost.like_count || 0 }})</span>
+                    </button>
+                    <div class="flex items-center gap-1">
+                        <span>💬 评论</span>
+                        <span>({{ currentPost.comment_count || 0 }})</span>
+                    </div>
+                </div>
+
+                <!-- Comments Section -->
+                <div class="mt-8 bg-gray-50 p-6 rounded">
+                    <h3 class="text-lg font-bold mb-4">评论</h3>
+                    <div v-if="currentPost.comments && currentPost.comments.length > 0" class="space-y-4 mb-6">
+                        <div v-for="comment in currentPost.comments" :key="comment.id" class="bg-white p-4 rounded shadow-sm border">
+                            <div class="flex items-center gap-2 mb-2">
+                                <img :src="comment.avatar_url || 'https://via.placeholder.com/24'" alt="加载失败" referrerpolicy="no-referrer" class="w-6 h-6 rounded-full object-cover">
+                                <span class="font-bold text-sm">
+                                    {{ comment.username }}
+                                    <span v-if="comment.role === 'admin'" class="bg-red-100 text-red-800 text-xs px-1.5 py-0.5 rounded ml-1 border border-red-200">管理员</span>
+                                </span>
+                                <span class="text-xs text-gray-500">{{ formatDate(comment.created_at) }}</span>
+                                <button v-if="currentUser && (currentUser.role === 'admin' || currentUser.id === comment.author_id)" @click="deleteComment(comment.id, currentPost)" class="text-red-500 hover:text-red-700 text-xs ml-2 underline">删除</button>
+                                <button @click="startReply(currentPost, comment)" class="text-blue-600 hover:text-blue-800 text-xs ml-2">回复</button>
+                            </div>
+                            <div class="prose max-w-none text-gray-800 break-words" v-html="renderMarkdown(comment.content)"></div>
+
+                            <!-- Replies -->
+                            <div v-if="comment.replies && comment.replies.length > 0" class="ml-8 mt-4 border-l-2 pl-4 border-gray-100 bg-gray-50 p-2 rounded">
+                                <div v-for="reply in comment.replies" :key="reply.id" class="mb-3 border-b border-gray-200 last:border-0 pb-2">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <img :src="reply.avatar_url || 'https://via.placeholder.com/24'" alt="加载失败" referrerpolicy="no-referrer" class="w-5 h-5 rounded-full object-cover">
+                                        <span class="font-bold text-sm text-gray-700">
+                                            {{ reply.username }}
+                                            <span v-if="reply.role === 'admin'" class="bg-red-100 text-red-800 text-xs px-1.5 py-0.5 rounded ml-1 border border-red-200">管理员</span>
+                                        </span>
+                                        <span class="text-xs text-gray-500">{{ formatDate(reply.created_at) }}</span>
+                                        <button v-if="currentUser && (currentUser.role === 'admin' || currentUser.id === reply.author_id)" @click="deleteComment(reply.id, currentPost)" class="text-red-500 hover:text-red-700 text-xs ml-2 underline">删除</button>
+                                        <button @click="startReply(currentPost, reply)" class="text-blue-600 hover:text-blue-800 text-xs ml-2">回复</button>
+                                    </div>
+                                    <div class="prose max-w-none text-gray-800 text-sm break-words" v-html="renderMarkdown(reply.content)"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-else class="text-gray-500 mb-6 italic">暂无评论。快来抢沙发吧！</div>
+                    
+                    <div class="flex flex-col gap-2">
+                        <div v-if="currentPost.replyingTo" class="bg-blue-50 p-2 rounded text-sm flex justify-between items-center">
+                            <span>回复 <strong>{{ currentPost.replyingTo.username }}</strong></span>
+                            <button @click="cancelReply(currentPost)" class="text-red-500 hover:underline">取消</button>
+                        </div>
+                        <div v-if="currentUser" class="flex gap-2">
+                            <input :id="'comment-input-' + currentPost.id" v-model="currentPost.newComment" type="text" :placeholder="currentPost.replyingTo ? '写下你的回复...' : '写下你的评论...'" class="flex-1 px-4 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500" @keyup.enter="postComment(currentPost)">
+                            <button @click="postComment(currentPost)" class="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700">发布</button>
+                        </div>
+                        <div v-else class="text-center bg-gray-100 p-4 rounded text-gray-600">
+                             请 <button @click="showLoginForm(); window.scrollTo({top: 0, behavior: 'smooth'})" class="text-blue-600 font-bold hover:underline">登录</button> 后参与评论
+                        </div>
+                    </div>
+                    <!-- Turnstile -->
+                    <div :id="'comment-turnstile-' + currentPost.id" class="mt-2"></div>
+                </div>
+             </div>
+        </main>
+
+        <!-- Main Content (Posts) -->
+        <main v-if="view === 'home'" class="space-y-6">
+            <!-- Stats Bar -->
+            <div class="bg-blue-50 border-l-4 border-blue-500 p-4 rounded shadow-sm flex items-center justify-between">
+                <div class="flex items-center gap-2 text-blue-800">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                    <span class="font-bold">已注册用户: {{ totalUsers }}</span>
+                </div>
+            </div>
+
+            <!-- (Post creation and list - same as before) -->
+            <div v-if="currentUser" class="bg-white p-6 rounded shadow">
+                <div class="flex justify-between items-center mb-4 cursor-pointer" @click="isEditing || (showPostForm = !showPostForm)">
+                    <h3 class="text-lg font-bold flex items-center gap-2">
+                        {{ isEditing ? '编辑帖子' : '发布新帖' }}
+                        <span v-if="!isEditing" class="text-gray-400 text-sm font-normal transition-transform duration-200" :class="{'rotate-180': showPostForm}">▼</span>
+                    </h3>
+                    <button v-if="isEditing" @click.stop="cancelEdit" class="text-red-500 text-sm hover:underline">取消编辑</button>
+                </div>
+                <div v-show="showPostForm || isEditing">
+                    <form @submit.prevent="createPost" class="space-y-4">
+                    <div v-if="categories.length > 0">
+                        <select v-model="newPost.category_id" class="w-full px-3 py-2 border rounded bg-gray-50">
+                            <option value="">选择分类 (可选)...</option>
+                            <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+                        </select>
+                    </div>
+                    <input v-model="newPost.title" type="text" placeholder="标题 (最多 30 字符)" class="w-full px-3 py-2 border rounded" maxlength="30" required>
+                    
+                    <!-- Markdown Editor/Preview Toggle -->
+                    <div class="border rounded">
+                        <div class="flex border-b bg-gray-50">
+                            <button type="button" @click="newPost.preview = false" :class="{'bg-white border-b-2 border-blue-500 font-bold': !newPost.preview}" class="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">编辑</button>
+                            <button type="button" @click="newPost.preview = true" :class="{'bg-white border-b-2 border-blue-500 font-bold': newPost.preview}" class="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">预览</button>
+                        </div>
+                        <div class="p-2">
+                            <textarea v-if="!newPost.preview" v-model="newPost.content" ref="postContent" @paste="handlePaste" placeholder="内容 (支持 Markdown, 最多 3000 字符, 支持 Ctrl+V 粘贴图片)..." class="w-full h-64 p-2 focus:outline-none resize-y" maxlength="3000" required></textarea>
+                            <div v-else class="w-full h-64 p-4 overflow-y-auto prose max-w-none border-0 break-words" v-html="renderMarkdown(newPost.content)"></div>
+                        </div>
+                        <div class="bg-gray-50 px-4 py-2 text-xs text-gray-500 flex justify-between items-center">
+                            <span>支持 Markdown 格式</span>
+                            <a href="https://www.markdownguide.org/basic-syntax/" target="_blank" class="text-blue-500 hover:underline">格式帮助</a>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center gap-4">
+                        <button type="submit" :disabled="loading" class="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50">
+                            {{ isEditing ? '更新' : '发布' }}
+                        </button>
+                        <div class="relative">
+                            <input type="file" @change="handleFileUpload" accept="image/*" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" :disabled="uploading">
+                            <button type="button" class="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 flex items-center gap-2">
+                                <span v-if="uploading">上传中...</span>
+                                <span v-else>📷 上传图片</span>
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Turnstile -->
+                    <div v-show="!isEditing" id="post-turnstile" class="mt-2"></div>
+                </form>
+                </div>
+            </div>
+            
+            <!-- Category Filter -->
+            <div class="bg-white p-4 rounded shadow mb-4 flex items-center gap-2" v-if="categories.length > 0">
+                <span class="font-bold text-gray-700">筛选分类:</span>
+                <select v-model="selectedCategory" @change="fetchPosts(0)" class="border rounded px-2 py-1 bg-gray-50">
+                    <option value="">全部</option>
+                    <option value="uncategorized">未分类</option>
+                    <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+                </select>
+            </div>
+
+            <div v-for="post in posts" :key="post.id" class="bg-white p-6 rounded shadow relative cursor-pointer hover:bg-gray-50 transition" :class="{'border-l-4 border-green-500': post.is_pinned}" @click="openPost(post)">
+                <div v-if="currentUser && currentUser.role === 'admin'" class="absolute top-4 right-4 flex gap-2" @click.stop>
+                     <button @click="togglePin(post)" class="text-sm" :class="post.is_pinned ? 'text-green-600' : 'text-gray-400 hover:text-green-600'">
+                        {{ post.is_pinned ? '取消置顶' : '置顶' }}
+                     </button>
+                     <select v-if="categories.length > 0" :value="post.category_id || ''" @change="movePost(post, $event.target.value)" class="text-xs border rounded px-1">
+                        <option value="">无分类</option>
+                        <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+                     </select>
+                     <button @click="adminDeletePost(post.id)" class="text-red-500 hover:text-red-700 text-sm">删除帖子</button>
+                </div>
+                <h3 class="text-xl font-bold text-gray-800 mb-2">
+                    <span v-if="post.is_pinned" class="text-green-600 mr-2">📌</span>
+                    {{ post.title }}
+                </h3>
+                <div class="flex items-center gap-2 mb-0">
+                    <img :src="post.author_avatar || 'https://via.placeholder.com/32'" alt="加载失败" referrerpolicy="no-referrer" class="w-6 h-6 rounded-full object-cover">
+                    <p class="text-gray-600 text-sm">
+                        发布者 {{ post.author_name }}
+                        <span v-if="post.author_role === 'admin'" class="bg-red-100 text-red-800 text-xs px-1.5 py-0.5 rounded ml-1 border border-red-200">管理员</span>
+                        <span v-if="post.category_name" class="bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded-full ml-1 border border-blue-200 cursor-pointer hover:bg-blue-200" @click.stop="selectedCategory = post.category_id; fetchPosts(0)">{{ post.category_name }}</span>
+                        于 {{ formatDate(post.created_at) }}
+                    </p>
+                </div>
+                <!-- Removed content preview -->
+                
+                <!-- Actions -->
+                <div class="flex items-center gap-6 mt-4 pt-4 border-t text-sm text-gray-500">
+                    <button @click.stop="toggleLike(post)" class="flex items-center gap-1 hover:text-blue-600" :class="{'text-blue-600 font-bold': post.liked}">
+                        <span>{{ post.liked ? '👍 已赞' : '👍 点赞' }}</span>
+                        <span>({{ post.like_count || 0 }})</span>
+                    </button>
+                    <button @click.stop="toggleComments(post)" class="flex items-center gap-1 hover:text-blue-600">
+                        <span>💬 评论</span>
+                        <span>({{ post.comment_count || 0 }})</span>
+                    </button>
+                </div>
+
+                <!-- Comments Section -->
+                <div v-if="post.showComments" class="mt-4 bg-gray-50 p-4 rounded" @click.stop>
+                    <h4 class="font-bold mb-4">评论</h4>
+                    <div v-if="post.comments && post.comments.length > 0" class="space-y-4 mb-4">
+                        <div v-for="comment in post.comments" :key="comment.id" class="border-b pb-2">
+                            <div class="flex items-center gap-2 mb-1">
+                                <img :src="comment.avatar_url || 'https://via.placeholder.com/24'" alt="加载失败" referrerpolicy="no-referrer" class="w-6 h-6 rounded-full object-cover">
+                                <span class="font-bold text-xs">
+                                    {{ comment.username }}
+                                    <span v-if="comment.role === 'admin'" class="bg-red-100 text-red-800 text-xs px-1.5 py-0.5 rounded ml-1 border border-red-200">管理员</span>
+                                </span>
+                                <span class="text-xs text-gray-500">{{ formatDate(comment.created_at) }}</span>
+                                <button v-if="currentUser && (currentUser.role === 'admin' || currentUser.id === comment.author_id)" @click="deleteComment(comment.id, post)" class="text-red-500 hover:text-red-700 text-xs ml-2 underline">删除</button>
+                                <button @click="startReply(post, comment)" class="text-blue-600 hover:text-blue-800 text-xs ml-2">回复</button>
+                            </div>
+                            <div class="prose max-w-none text-gray-800 text-sm break-words" v-html="renderMarkdown(comment.content)"></div>
+                            
+                            <!-- Replies -->
+                            <div v-if="comment.replies && comment.replies.length > 0" class="ml-6 mt-2 border-l-2 pl-3 border-gray-200">
+                                <div v-for="reply in comment.replies" :key="reply.id" class="mb-2 border-b border-gray-100 last:border-0 pb-1">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <img :src="reply.avatar_url || 'https://via.placeholder.com/24'" alt="加载失败" referrerpolicy="no-referrer" class="w-5 h-5 rounded-full object-cover">
+                                        <span class="font-bold text-xs text-gray-700">
+                                            {{ reply.username }}
+                                            <span v-if="reply.role === 'admin'" class="bg-red-100 text-red-800 text-[10px] px-1 py-0.5 rounded ml-1 border border-red-200">管理员</span>
+                                        </span>
+                                        <span class="text-[10px] text-gray-400">{{ formatDate(reply.created_at) }}</span>
+                                        <button v-if="currentUser && (currentUser.role === 'admin' || currentUser.id === reply.author_id)" @click="deleteComment(reply.id, post)" class="text-red-500 hover:text-red-700 text-[10px] ml-1 underline">删除</button>
+                                        <button @click="startReply(post, reply)" class="text-blue-600 hover:text-blue-800 text-[10px] ml-1">回复</button>
+                                    </div>
+                                    <div class="prose max-w-none text-gray-700 text-xs break-words" v-html="renderMarkdown(reply.content)"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-else class="text-gray-500 mb-4 text-sm">暂无评论。</div>
+                    
+                    <div class="flex flex-col gap-2">
+                        <div v-if="post.replyingTo" class="bg-blue-50 p-2 rounded text-xs flex justify-between items-center">
+                            <span>回复 <strong>{{ post.replyingTo.username }}</strong></span>
+                            <button @click="cancelReply(post)" class="text-red-500 hover:underline">取消</button>
+                        </div>
+                        <div v-if="currentUser" class="flex gap-2">
+                            <input :id="'comment-input-' + post.id" v-model="post.newComment" type="text" :placeholder="post.replyingTo ? '写下你的回复...' : '写下你的评论...'" class="flex-1 px-3 py-2 border rounded text-sm" @keyup.enter="postComment(post)">
+                            <button @click="postComment(post)" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">发布</button>
+                        </div>
+                         <div v-else class="text-center bg-gray-100 p-2 rounded text-gray-600 text-sm">
+                             请 <button @click="showLoginForm(); window.scrollTo({top: 0, behavior: 'smooth'})" class="text-blue-600 font-bold hover:underline">登录</button> 后参与评论
+                        </div>
+                    </div>
+                    <!-- Turnstile -->
+                    <div :id="'comment-turnstile-' + post.id" class="mt-2"></div>
+                </div>
+            </div>
+            <div v-if="posts.length === 0 && !loading" class="text-center text-gray-500 py-8">暂无帖子。快来发布第一篇吧！</div>
+            
+            <!-- Pagination Controls -->
+            <div v-if="posts.length > 0 || pageOffset > 0" class="flex flex-col md:flex-row justify-between items-center py-8 px-4 bg-white rounded shadow mt-6 gap-4">
+                <div class="flex items-center gap-2">
+                    <button 
+                        @click="changePage(-1)" 
+                        :disabled="pageOffset === 0 || loading"
+                        class="px-3 py-1.5 rounded bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 text-sm"
+                    >
+                        &larr; 上一页
+                    </button>
+                    
+                    <!-- Page Numbers -->
+                    <div class="flex items-center gap-1">
+                        <template v-if="totalPosts > 0">
+                            <!-- Logic to show simplified pages: 1 ... current-1 current current+1 ... last -->
+                            <template v-for="p in Math.ceil(totalPosts / pageLimit)" :key="p">
+                                <button 
+                                    v-if="
+                                        p === 1 || 
+                                        p === Math.ceil(totalPosts / pageLimit) || 
+                                        (p >= (Math.floor(pageOffset / pageLimit) + 1) - 1 && p <= (Math.floor(pageOffset / pageLimit) + 1) + 1)
+                                    "
+                                    @click="goToPage(p)"
+                                    class="w-8 h-8 flex items-center justify-center rounded text-sm transition-colors"
+                                    :class="(Math.floor(pageOffset / pageLimit) + 1) === p ? 'bg-blue-600 text-white font-bold' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'"
+                                >
+                                    {{ p }}
+                                </button>
+                                <span v-else-if="
+                                    (p === 2 && (Math.floor(pageOffset / pageLimit) + 1) > 3) || 
+                                    (p === Math.ceil(totalPosts / pageLimit) - 1 && (Math.floor(pageOffset / pageLimit) + 1) < Math.ceil(totalPosts / pageLimit) - 2)
+                                " class="text-gray-400 text-xs px-1">...</span>
+                            </template>
+                        </template>
+                        <span v-else class="text-gray-600 text-sm">
+                            第 {{ Math.floor(pageOffset / pageLimit) + 1 }} 页
+                        </span>
+                    </div>
+
+                    <button 
+                        @click="changePage(1)" 
+                        :disabled="!hasMore || loading"
+                        class="px-3 py-1.5 rounded bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 text-sm"
+                    >
+                        下一页 &rarr;
+                    </button>
+                </div>
+
+                <!-- Jump to Page -->
+                <div class="flex items-center gap-2 text-sm text-gray-600" v-if="totalPosts > pageLimit">
+                    <span>跳转至</span>
+                    <input 
+                        type="number" 
+                        v-model.number="jumpPage" 
+                        @keyup.enter="goToPage(jumpPage)"
+                        min="1" 
+                        :max="Math.ceil(totalPosts / pageLimit)"
+                        class="w-16 px-2 py-1 border rounded text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                    <span>页</span>
+                    <button @click="goToPage(jumpPage)" class="bg-blue-100 text-blue-700 px-3 py-1 rounded hover:bg-blue-200">GO</button>
+                </div>
+            </div>
+        </main>
+        
+        <div v-else-if="!showLogin && !showRegister && !showForgot && !showReset && !currentUser && view !== 'home' && view !== 'post'" class="text-center py-20">
+            <h2 class="text-3xl font-bold text-gray-800 mb-4">欢迎来到论坛</h2>
+            <p class="text-gray-600 mb-8">请登录或注册以浏览和发布内容。</p>
+            <button @click="showLogin = true" class="bg-blue-600 text-white px-8 py-3 rounded text-lg hover:bg-blue-700">立即开始</button>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, reactive, watch, nextTick } = Vue;
+
+        createApp({
+            setup() {
+                const currentUser = ref(JSON.parse(localStorage.getItem('user') || 'null'));
+                const token = ref(localStorage.getItem('token') || '');
+                const showLogin = ref(false); // Deprecated
+                const showRegister = ref(false); // Deprecated
+                const showForgot = ref(false); // Deprecated
+                const showReset = ref(false); // Deprecated
+                const loading = ref(false);
+                const uploading = ref(false);
+                const error = ref('');
+                const verificationMessage = ref('');
+                const posts = ref([]);
+                const categories = ref([]);
+                const selectedCategory = ref('');
+                const currentPost = ref(null);
+                const likedPostIds = ref(new Set());
+                const pageOffset = ref(0);
+                const pageLimit = 10;
+                const hasMore = ref(true);
+                const loadingMore = ref(false); // Can keep for button disabled state
+                // Initialize view based on URL to prevent flashing
+                const path = window.location.pathname;
+                const postMatch = path.match(/^\/posts\/(\d+)$/);
+                const urlParams = new URLSearchParams(window.location.search);
+                
+                let initialView = 'home';
+                if (postMatch) initialView = 'post';
+                else if (urlParams.get('reset_token')) initialView = 'reset';
+
+                const view = ref(initialView);
+                const adminStats = reactive({ users: 0, posts: 0, comments: 0 });
+                const adminUsers = ref([]);
+                const adminCategories = ref([]); // For admin view management
+                
+                // Admin Edit State
+                const adminEdit = reactive({ user: null, email: '', password: '', username: '', avatar_url: '' });
+                const adminCategoryForm = reactive({ id: null, name: '' });
+
+                const totpRequired = ref(false);
+                const totpSetup = reactive({ secret: '', uri: '', code: '' });
+                const emailChange = reactive({ newEmail: '', code: '' });
+                
+                const profileForm = reactive({ username: '', avatar_url: '', email_notifications: true });
+                const deleteAccountForm = reactive({ password: '', totp_code: '' });
+
+                const turnstileConfig = reactive({ enabled: false, siteKey: '' });
+                const systemSettings = reactive({ 
+                    turnstile_enabled: false,
+                    notify_on_user_delete: false,
+                    notify_on_username_change: false,
+                    notify_on_avatar_change: false,
+                    notify_on_manual_verify: false
+                });
+                const turnstileToken = ref('');
+                const totalUsers = ref(0);
+                const totalPosts = ref(0); // New: For pagination
+                const jumpPage = ref(1); // New: For page jumping
+
+                const form = reactive({
+                    email: '',
+                    username: '',
+                    password: '',
+                    totp_code: ''
+                });
+
+                const newPost = reactive({ title: '', content: '', category_id: '', draftId: crypto.randomUUID(), preview: false, id: null });
+                const isEditing = ref(false);
+                const showPostForm = ref(false);
+                const API_BASE = '/api';
+
+                // Global Fetch Interceptor (Cloudflare 403 & Auth 401)
+                if (!window._fetchInterceptorAttached) {
+                    window._fetchInterceptorAttached = true;
+                    const originalFetch = window.fetch;
+                    window.fetch = async (...args) => {
+                         try {
+                             const response = await originalFetch(...args);
+                             
+                             // 403 Cloudflare Challenge
+                             if (response.status === 403) {
+                                 const contentType = response.headers.get('content-type');
+                                 if (contentType && contentType.includes('text/html')) {
+                                     console.warn('Cloudflare 403 detected, reloading...');
+                                     window.location.reload();
+                                     return new Promise(() => {}); 
+                                 }
+                             }
+
+                             // 401 Unauthorized (Token Expired)
+                             if (response.status === 401) {
+                                 if (token.value) {
+                                     console.warn('Token expired (401), logging out...');
+                                     localStorage.removeItem('token');
+                                     localStorage.removeItem('user');
+                                     token.value = '';
+                                     currentUser.value = null;
+                                     view.value = 'login';
+                                     alert('登录已过期，请重新登录');
+                                 }
+                             }
+                             
+                             return response;
+                         } catch (e) { throw e; }
+                    };
+                    window._fetchInterceptorAttached = true;
+                }
+
+                // Security Validators
+                const Validator = {
+                    hasInvisibleCharacters: (str) => /[\u200B-\u200F\uFEFF\u2028\u2029\u180E\u3164\u115F\u1160]/.test(str),
+                    isVisuallyEmpty: (str) => {
+                        if (!str) return true;
+                        const stripped = str.replace(/[\s\u200B-\u200F\uFEFF\u2028\u2029\u180E\u3164\u115F\u1160\x00-\x1F\x7F]+/g, '');
+                        return stripped.length === 0;
+                    },
+                    hasControlCharacters: (str) => /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(str),
+                    validateText: (str, label) => {
+                         if (!str) return `${label}不能为空`;
+                         if (Validator.isVisuallyEmpty(str)) return `${label}不能为空（包含不可见字符）`;
+                         if (Validator.hasInvisibleCharacters(str)) return `${label}包含非法隐形字符`;
+                         if (Validator.hasControlCharacters(str)) return `${label}包含非法控制字符`;
+                         return null;
+                    }
+                };
+
+                const getSecurityHeaders = (method = 'GET', contentType = 'application/json') => {
+                    const headers = {};
+                    if (token.value) {
+                        headers['Authorization'] = `Bearer ${token.value}`;
+                    }
+                    if (['POST', 'PUT', 'DELETE'].includes(method.toUpperCase())) {
+                        headers['X-Timestamp'] = Math.floor(Date.now() / 1000).toString();
+                        headers['X-Nonce'] = crypto.randomUUID();
+                    }
+                    if (contentType) {
+                        headers['Content-Type'] = contentType;
+                    }
+                    return headers;
+                };
+
+                const fetchConfig = async () => {
+                    try {
+                        const res = await fetch(`${API_BASE}/config`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            turnstileConfig.enabled = data.turnstile_enabled;
+                            turnstileConfig.siteKey = data.turnstile_site_key;
+                            totalUsers.value = data.user_count || 0;
+                        }
+                    } catch (e) { console.error(e); }
+                };
+
+                const fetchCategories = async () => {
+                    try {
+                        const res = await fetch(`${API_BASE}/categories`);
+                        if (res.ok) categories.value = await res.json();
+                    } catch (e) { console.error(e); }
+                };
+
+                const renderTurnstile = (containerId) => {
+                    if (!turnstileConfig.enabled) return;
+                    nextTick(() => {
+                        const container = document.getElementById(containerId);
+                        if (container) {
+                            container.innerHTML = ''; // Clear previous
+                            turnstile.render(`#${containerId}`, {
+                                sitekey: turnstileConfig.siteKey,
+                                callback: (token) => { turnstileToken.value = token; },
+                            });
+                        }
+                    });
+                };
+
+                const toggleAuthMode = () => {
+                    if (view.value === 'login') showRegisterForm();
+                    else showLoginForm();
+                };
+
+                const showForgotForm = () => {
+                    view.value = 'forgot';
+                    error.value = '';
+                    turnstileToken.value = '';
+                    renderTurnstile('auth-turnstile');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                };
+
+                const showLoginForm = () => {
+                    view.value = 'login';
+                    error.value = '';
+                    turnstileToken.value = '';
+                    renderTurnstile('auth-turnstile');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                };
+
+                const showRegisterForm = () => {
+                    view.value = 'register';
+                    error.value = '';
+                    turnstileToken.value = '';
+                    renderTurnstile('auth-turnstile');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                };
+
+                // Auth Handlers
+                const handleLogin = async () => {
+                    if (turnstileConfig.enabled && !turnstileToken.value) return error.value = 'Please complete the CAPTCHA';
+                    loading.value = true; error.value = '';
+                    try {
+                        const res = await fetch(`${API_BASE}/login`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ 
+                                email: form.email, 
+                                password: form.password, 
+                                totp_code: form.totp_code,
+                                'cf-turnstile-response': turnstileToken.value 
+                            })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) {
+                            // Reset Turnstile on any error (including TOTP_REQUIRED) because the token was likely consumed
+                            turnstileToken.value = ''; renderTurnstile('auth-turnstile');
+                            
+                            if (data.error === 'TOTP_REQUIRED') {
+                                error.value = 'Please enter your 2FA code.'; loading.value = false; return;
+                            }
+                            
+                            throw new Error(data.error || 'Login failed');
+                        }
+                        currentUser.value = data.user;
+                        // Init profile form
+                        profileForm.username = data.user.username;
+                        profileForm.avatar_url = data.user.avatar_url || '';
+                        profileForm.email_notifications = data.user.email_notifications;
+                        
+                        token.value = data.token;
+                        localStorage.setItem('user', JSON.stringify(data.user));
+                        localStorage.setItem('token', data.token);
+                        form.password = ''; form.totp_code = ''; totpRequired.value = false;
+                        goHome(); // Redirect to home
+                    } catch (e) { error.value = e.message; } finally { loading.value = false; }
+                };
+
+                const handleRegister = async () => {
+                    if (turnstileConfig.enabled && !turnstileToken.value) return error.value = 'Please complete the CAPTCHA';
+                    loading.value = true; error.value = ''; verificationMessage.value = '';
+                    try {
+                        const res = await fetch(`${API_BASE}/register`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ ...form, 'cf-turnstile-response': turnstileToken.value })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) {
+                             turnstileToken.value = ''; renderTurnstile('auth-turnstile');
+                             throw new Error(data.error || 'Registration failed');
+                        }
+                        verificationMessage.value = 'Registration successful! Please check your email to verify.';
+                        showLoginForm();
+                    } catch (e) { error.value = e.message; } finally { loading.value = false; }
+                };
+
+                const handleForgot = async () => {
+                    if (turnstileConfig.enabled && !turnstileToken.value) return error.value = 'Please complete the CAPTCHA';
+                    loading.value = true; error.value = '';
+                    try {
+                        const res = await fetch(`${API_BASE}/auth/forgot-password`, {
+                            method: 'POST', headers: getSecurityHeaders('POST'), 
+                            body: JSON.stringify({ email: form.email, 'cf-turnstile-response': turnstileToken.value })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) {
+                            turnstileToken.value = ''; renderTurnstile('auth-turnstile');
+                            throw new Error(data.error);
+                        }
+                        alert('If an account exists, a reset email has been sent.');
+                        showLoginForm();
+                    } catch (e) { error.value = e.message; } finally { loading.value = false; }
+                };
+
+                const handleReset = async () => {
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const resetToken = urlParams.get('reset_token');
+                    if (!resetToken) { error.value = 'Missing reset token'; return; }
+                    
+                    if (turnstileConfig.enabled && !turnstileToken.value) return error.value = 'Please complete the CAPTCHA';
+
+                    loading.value = true; error.value = '';
+                    try {
+                        const res = await fetch(`${API_BASE}/auth/reset-password`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ 
+                                token: resetToken, 
+                                new_password: form.password, 
+                                totp_code: form.totp_code,
+                                'cf-turnstile-response': turnstileToken.value
+                            })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) {
+                            turnstileToken.value = ''; renderTurnstile('auth-turnstile');
+                            throw new Error(data.error);
+                        }
+                        alert('密码重置成功！请登录。');
+                        window.history.replaceState({}, document.title, window.location.pathname); // Clear token from URL
+                        showLoginForm();
+                    } catch (e) { error.value = e.message; } finally { loading.value = false; }
+                };
+
+                const saveProfile = async () => {
+                    if (profileForm.username) {
+                        const err = Validator.validateText(profileForm.username, '用户名');
+                        if (err) return alert(err);
+                    }
+                    try {
+                        const res = await fetch(`${API_BASE}/user/profile`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ 
+                                username: profileForm.username, 
+                                avatar_url: profileForm.avatar_url,
+                                email_notifications: profileForm.email_notifications
+                            })
+                        });
+                        const data = await res.json();
+                        if (res.ok) {
+                            currentUser.value = data.user;
+                            localStorage.setItem('user', JSON.stringify(data.user));
+                            alert('资料已更新！');
+                        } else alert(data.error);
+                    } catch (e) { alert(e.message); }
+                };
+
+                const uploadAvatar = async (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+
+                    if (file.size > 500 * 1024) {
+                        alert('文件过大 (最大 500KB)');
+                        event.target.value = '';
+                        return;
+                    }
+
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('type', 'avatar');
+                    try {
+                        const res = await fetch(`${API_BASE}/upload`, { method: 'POST', headers: getSecurityHeaders('POST', null), body: formData });
+                        const data = await res.json();
+                        if (res.ok) {
+                            profileForm.avatar_url = data.url;
+                        } else alert(data.error);
+                    } catch (e) { alert(e.message); }
+                };
+
+                const deleteAccount = async () => {
+                    if (!confirm('确定要删除您的账号吗？此操作无法撤销。')) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/user/delete`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ password: deleteAccountForm.password, totp_code: deleteAccountForm.totp_code })
+                        });
+                        if (res.ok) {
+                            alert('账号已删除。');
+                            logout();
+                        } else {
+                            const data = await res.json();
+                            alert(data.error);
+                        }
+                    } catch (e) { alert(e.message); }
+                };
+
+                const requestEmailChange = async () => {
+                    if (!emailChange.newEmail) return alert('请输入新邮箱');
+                    try {
+                        const res = await fetch(`${API_BASE}/user/change-email`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ new_email: emailChange.newEmail, totp_code: emailChange.code })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error);
+                        alert('验证邮件已发送至新地址。');
+                        emailChange.newEmail = ''; emailChange.code = '';
+                    } catch (e) { alert(e.message); }
+                };
+
+                const openAdminEdit = (user) => {
+                    adminEdit.user = user;
+                    adminEdit.email = user.email;
+                    adminEdit.username = user.username;
+                    adminEdit.avatar_url = user.avatar_url || '';
+                    adminEdit.password = '';
+                };
+
+                const resetAvatar = () => {
+                    adminEdit.avatar_url = '';
+                };
+
+                const toggleLike = async (post) => {
+                    if (!currentUser.value) return alert('请登录后点赞');
+                    try {
+                        const res = await fetch(`${API_BASE}/posts/${post.id}/like`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({})
+                        });
+                        const data = await res.json();
+                        if (res.ok) {
+                            post.liked = data.liked;
+                            post.like_count += data.liked ? 1 : -1;
+                        }
+                    } catch (e) { console.error(e); }
+                };
+
+                const saveSettings = async () => {
+                    // Silent save or toast? Let's use toast or simple alert if user changed it. 
+                    // Since it's bound to @change, removing confirm for better UX, or keeping it?
+                    // The existing code used confirm. Let's keep it simple for now but maybe remove confirm to make it smoother.
+                    // "保存设置？" on every checkbox click is annoying.
+                    
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/settings`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ 
+                                turnstile_enabled: systemSettings.turnstile_enabled,
+                                notify_on_user_delete: systemSettings.notify_on_user_delete,
+                                notify_on_username_change: systemSettings.notify_on_username_change,
+                                notify_on_avatar_change: systemSettings.notify_on_avatar_change,
+                                notify_on_manual_verify: systemSettings.notify_on_manual_verify
+                            })
+                        });
+                        if (res.ok) {
+                            // alert('设置已保存'); // Optional: show a small toast or nothing
+                            turnstileConfig.enabled = systemSettings.turnstile_enabled;
+                        }
+                        else alert('保存失败');
+                    } catch (e) { alert(e.message); }
+                };
+
+                const organizeComments = (comments) => {
+                    if (!comments) return [];
+                    const roots = [];
+                    const map = {};
+                    comments.forEach(c => {
+                         c.replies = [];
+                         map[c.id] = c;
+                    });
+                    comments.forEach(c => {
+                         if (c.parent_id && map[c.parent_id]) {
+                             map[c.parent_id].replies.push(c);
+                         } else {
+                             roots.push(c);
+                         }
+                    });
+                    return roots;
+                };
+
+                const startReply = (post, comment) => {
+                    post.replyingTo = comment;
+                    nextTick(() => {
+                        // Ideally scroll to input
+                        const input = document.getElementById(`comment-input-${post.id}`);
+                        if (input) input.focus();
+                    });
+                };
+
+                const cancelReply = (post) => {
+                    post.replyingTo = null;
+                };
+
+                const toggleComments = async (post) => {
+                    post.showComments = !post.showComments;
+                    if (post.showComments) {
+                        if (!post.comments) {
+                             const res = await fetch(`${API_BASE}/posts/${post.id}/comments`);
+                             if (res.ok) {
+                                 const rawComments = await res.json();
+                                 post.comments = organizeComments(rawComments);
+                             }
+                        }
+                        if (turnstileConfig.enabled) {
+                             renderTurnstile(`comment-turnstile-${post.id}`);
+                        }
+                    }
+                };
+
+                const postComment = async (post) => {
+                    const err = Validator.validateText(post.newComment, '评论');
+                    if (err) return alert(err);
+
+                    if (!currentUser.value) return alert('Please login to comment');
+                    
+                    const parentId = post.replyingTo ? post.replyingTo.id : null;
+                    
+                    try {
+                        const res = await fetch(`${API_BASE}/posts/${post.id}/comments`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ 
+                                content: post.newComment,
+                                parent_id: parentId,
+                                'cf-turnstile-response': turnstileToken.value 
+                            })
+                        });
+                        if (res.ok) {
+                            post.newComment = '';
+                            post.replyingTo = null;
+                            turnstileToken.value = ''; renderTurnstile(`comment-turnstile-${post.id}`);
+                            // Refresh comments
+                            const commentsRes = await fetch(`${API_BASE}/posts/${post.id}/comments`);
+                            if (commentsRes.ok) {
+                                const rawComments = await commentsRes.json();
+                                post.comments = organizeComments(rawComments);
+                                post.comment_count++; // Logic might be slightly off if we fetched all, but close enough
+                            }
+                        } else {
+                            turnstileToken.value = ''; renderTurnstile(`comment-turnstile-${post.id}`);
+                            alert((await res.json()).error);
+                        }
+                    } catch (e) { alert(e.message); }
+                };
+
+                const cleanupStats = ref(null);
+                const analyzing = ref(false);
+
+                const analyzeCleanup = async () => {
+                    analyzing.value = true;
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/cleanup/analyze`, { headers: getSecurityHeaders() });
+                        if (res.ok) cleanupStats.value = await res.json();
+                        else alert((await res.json()).error);
+                    } catch (e) { alert(e.message); }
+                    finally { analyzing.value = false; }
+                };
+
+                const executeCleanup = async () => {
+                    if (!cleanupStats.value || !cleanupStats.value.orphans.length) return;
+                    if (!confirm(`确定要删除 ${cleanupStats.value.orphaned_files} 个孤立文件吗？`)) return;
+                    analyzing.value = true;
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/cleanup/execute`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ orphans: cleanupStats.value.orphans })
+                        });
+                        if (res.ok) {
+                            alert('清理任务已开始');
+                            cleanupStats.value = null; 
+                        } else alert((await res.json()).error);
+                    } catch (e) { alert(e.message); }
+                    finally { analyzing.value = false; }
+                };
+
+                const deletePost = async (id) => {
+                    if (!confirm('确定要删除这个帖子吗？此操作无法撤销。')) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/posts/${id}`, {
+                            method: 'DELETE',
+                            headers: getSecurityHeaders('DELETE')
+                        });
+                        if (res.ok) {
+                            alert('帖子已删除');
+                            posts.value = posts.value.filter(p => p.id !== id);
+                            if (totalPosts.value > 0) totalPosts.value--;
+                            if (view.value === 'post') {
+                                goHome();
+                            }
+                        } else {
+                            alert((await res.json()).error);
+                        }
+                    } catch (e) {
+                        alert('Delete failed: ' + e.message);
+                    }
+                };
+
+                const saveAdminEdit = async () => {
+                    if (!confirm('保存修改？')) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/users/${adminEdit.user.id}/update`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ 
+                                email: adminEdit.email, 
+                                password: adminEdit.password || undefined,
+                                username: adminEdit.username,
+                                avatar_url: adminEdit.avatar_url
+                            })
+                        });
+                        if (res.ok) {
+                            alert('用户已更新');
+                            adminEdit.user = null;
+                            fetchAdminData();
+                        } else {
+                            alert('更新失败: ' + (await res.json()).error);
+                        }
+                    } catch (e) { alert(e.message); }
+                };
+
+                const goHome = () => {
+                    view.value = 'home';
+                    currentPost.value = null;
+                    window.history.pushState({}, '', '/');
+                    fetchPosts();
+                };
+
+                const fetchPost = async (id) => {
+                    loading.value = true;
+                    try {
+                        const userId = currentUser.value ? currentUser.value.id : '';
+                        const res = await fetch(`${API_BASE}/posts/${id}?user_id=${userId}`);
+                        if (res.ok) {
+                            const post = await res.json();
+                            // Fetch comments
+                            const commentsRes = await fetch(`${API_BASE}/posts/${id}/comments`);
+                            if (commentsRes.ok) {
+                                const rawComments = await commentsRes.json();
+                                post.comments = organizeComments(rawComments);
+                            } else {
+                                post.comments = [];
+                            }
+                            post.newComment = '';
+                            currentPost.value = post;
+                            // Turnstile
+                            if (turnstileConfig.enabled) {
+                                nextTick(() => renderTurnstile(`comment-turnstile-${post.id}`));
+                            }
+                        } else {
+                            error.value = 'Post not found';
+                            view.value = 'home'; // Fallback
+                        }
+                    } catch (e) {
+                        console.error(e);
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+
+                const openPost = (post) => {
+                    view.value = 'post';
+                    window.history.pushState({}, '', `/posts/${post.id}`);
+                    fetchPost(post.id);
+                };
+
+                // Existing helpers (logout, createPost, upload, etc.)
+                const logout = () => {
+                    currentUser.value = null; token.value = ''; 
+                    localStorage.removeItem('user'); localStorage.removeItem('token');
+                    posts.value = []; verificationMessage.value = ''; totpRequired.value = false;
+                    goHome();
+                };
+
+                // Fetch all liked post IDs for the current user
+                const fetchUserLikes = async () => {
+                    if (!currentUser.value) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/user/likes`, { headers: getSecurityHeaders() });
+                        if (res.ok) {
+                            const ids = await res.json();
+                            likedPostIds.value = new Set(ids);
+                        }
+                    } catch (e) {
+                        console.error('Error fetching user likes:', e);
+                    }
+                };
+
+                const fetchPosts = async (offset = 0) => {
+                    loading.value = true;
+                    
+                    try {
+                        // Refresh likes on initial load or page change
+                        await fetchUserLikes();
+                        
+                        let url = `${API_BASE}/posts?limit=${pageLimit}&offset=${offset}`;
+                        if (selectedCategory.value) url += `&category_id=${selectedCategory.value}`;
+                        
+                        const res = await fetch(url);
+                        
+                        if (res.ok) {
+                            const data = await res.json();
+                            
+                            // Support both old array format (just in case) and new object format
+                            let postsArray = [];
+                            if (Array.isArray(data)) {
+                                postsArray = data;
+                            } else if (data.posts) {
+                                postsArray = data.posts;
+                                totalPosts.value = data.total; // Update total count
+                            } else {
+                                console.error('Unexpected API response format', data);
+                                return;
+                            }
+
+                            if (postsArray.length < pageLimit && totalPosts.value === 0) {
+                                // Fallback if total not provided or small set
+                                hasMore.value = false;
+                            } else {
+                                // Logic using total
+                                hasMore.value = (offset + pageLimit) < totalPosts.value;
+                            }
+
+                            // Process posts
+                            const processedPosts = postsArray.map(post => {
+                                post.liked = likedPostIds.value.has(post.id);
+                                post.showComments = false;
+                                post.comments = null;
+                                post.newComment = '';
+                                return post;
+                            });
+                            
+                            posts.value = processedPosts;
+                            pageOffset.value = offset;
+                            jumpPage.value = Math.floor(offset / pageLimit) + 1; // Sync input
+                        } else {
+                            console.error('Failed to fetch posts:', await res.text());
+                        }
+                    } catch (e) {
+                        console.error('Error fetching posts:', e);
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+
+                const changePage = (direction) => {
+                    const newOffset = pageOffset.value + (direction * pageLimit);
+                    if (newOffset < 0) return;
+                    fetchPosts(newOffset);
+                };
+
+                const goToPage = (page) => {
+                    if (!page || page < 1) page = 1;
+                    const maxPage = Math.ceil(totalPosts.value / pageLimit);
+                    if (maxPage > 0 && page > maxPage) page = maxPage;
+                    
+                    const newOffset = (page - 1) * pageLimit;
+                    fetchPosts(newOffset);
+                };
+
+                const createPost = async () => {
+                    const titleErr = Validator.validateText(newPost.title, '标题');
+                    if (titleErr) return alert(titleErr);
+                    
+                    const contentErr = Validator.validateText(newPost.content, '内容');
+                    if (contentErr) return alert(contentErr);
+
+                    loading.value = true;
+                    try {
+                        let url = `${API_BASE}/posts`;
+                        let method = 'POST';
+                        
+                        if (isEditing.value) {
+                            url = `${API_BASE}/posts/${newPost.id}`;
+                            method = 'PUT';
+                        }
+
+                        const body = {
+                            title: newPost.title, 
+                            content: newPost.content,
+                            category_id: newPost.category_id || null
+                        };
+
+                        if (!isEditing.value) {
+                             body['cf-turnstile-response'] = turnstileToken.value;
+                        }
+
+                        const res = await fetch(url, {
+                            method: method,
+                            headers: getSecurityHeaders(method),
+                            body: JSON.stringify(body)
+                        });
+
+                        if (res.ok) { 
+                            localStorage.removeItem('forum_draft'); // Clear draft on success
+                            const wasEditing = isEditing.value;
+                            const editedId = newPost.id;
+
+                            newPost.title = ''; 
+                            newPost.content = ''; 
+                            newPost.category_id = '';
+                            newPost.draftId = crypto.randomUUID(); 
+                            newPost.id = null;
+                            isEditing.value = false;
+                            
+                            if (!wasEditing) {
+                                turnstileToken.value = ''; // Reset token
+                                showPostForm.value = false; // Collapse form on success
+                                // renderTurnstile('post-turnstile'); // Re-render // No need to re-render if collapsed, will render when opened
+                            }
+                            
+                            // If we were editing the currently viewed post, return to it
+                            if (wasEditing && currentPost.value && currentPost.value.id === editedId) {
+                                view.value = 'post';
+                                fetchPost(editedId);
+                            } else if (view.value === 'post') {
+                                // If editing in post view (future proof), refresh post
+                                fetchPost(currentPost.value.id);
+                            } else {
+                                await fetchPosts(); 
+                            }
+                            alert(wasEditing ? '更新成功' : '发布成功');
+                        }
+                        else {
+                            if (!isEditing.value) {
+                                turnstileToken.value = ''; renderTurnstile('post-turnstile');
+                            }
+                            throw new Error((await res.json()).error);
+                        }
+                    } catch (e) { alert(e.message); } finally { loading.value = false; }
+                };
+
+                const startEditPost = (post) => {
+                    newPost.id = post.id;
+                    newPost.title = post.title;
+                    newPost.content = post.content;
+                    newPost.category_id = post.category_id || '';
+                    isEditing.value = true;
+                    showPostForm.value = true;
+                    // Switch to home view to see editor if not already visible, 
+                    // OR you could make the editor a modal. For simplicity, let's scroll to top of home or show editor.
+                    // Given the current layout, the editor is only on 'home'.
+                    view.value = 'home';
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                };
+
+                const cancelEdit = () => {
+                    const wasEditingId = newPost.id;
+                    newPost.id = null;
+                    newPost.title = '';
+                    newPost.content = '';
+                    newPost.category_id = '';
+                    newPost.preview = false;
+                    isEditing.value = false;
+                    showPostForm.value = false;
+
+                    // If we were editing the currently viewed post, return to it
+                    if (currentPost.value && currentPost.value.id === wasEditingId) {
+                        view.value = 'post';
+                    }
+                };
+
+                const deleteComment = async (id, postContext = null) => {
+                    if (!confirm('确定要删除此评论吗？此操作无法撤销。')) return;
+                    try {
+                        // Use the unified comments endpoint which supports both user and admin
+                        const res = await fetch(`${API_BASE}/comments/${id}`, {
+                            method: 'DELETE',
+                            headers: getSecurityHeaders('DELETE')
+                        });
+                        
+                        if (res.ok) {
+                            // If we have context (like in admin panel or post view), update UI locally
+                            if (postContext) {
+                                const initialLength = postContext.comments.length;
+                                postContext.comments = postContext.comments.filter(c => c.id !== id);
+                                
+                                // If not removed from roots (length unchanged), try removing from replies
+                                if (postContext.comments.length === initialLength) {
+                                    postContext.comments.forEach(c => {
+                                        if (c.replies) {
+                                            c.replies = c.replies.filter(r => r.id !== id);
+                                        }
+                                    });
+                                }
+                                postContext.comment_count = Math.max(0, postContext.comment_count - 1);
+                            } 
+                            // Refresh post to update comments if we are in post view
+                            else if (view.value === 'post' && currentPost.value) {
+                                fetchPost(currentPost.value.id);
+                            }
+                        } else {
+                            // Fallback: try admin endpoint if normal fails (though backend logic handles auth)
+                            // Actually, backend /api/comments/:id handles admin role too, so no need for fallback.
+                            alert((await res.json()).error);
+                        }
+                    } catch (e) {
+                        alert(e.message);
+                    }
+                };
+
+                const handleFileUpload = async (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    await processAndUploadImage(file);
+                    event.target.value = ''; // Clear input
+                };
+
+                const handlePaste = async (event) => {
+                    const items = (event.clipboardData || event.originalEvent.clipboardData).items;
+                    for (const item of items) {
+                        if (item.kind === 'file' && item.type.startsWith('image/')) {
+                            const file = item.getAsFile();
+                            await processAndUploadImage(file);
+                        }
+                    }
+                };
+
+                const processAndUploadImage = async (file) => {
+                    if (!currentUser.value) return alert('请登录后上传');
+                    
+                    uploading.value = true;
+                    try {
+                        // Compress Image
+                        const options = {
+                            maxSizeMB: 0.5, // 500KB
+                            maxWidthOrHeight: 1920,
+                            useWebWorker: true,
+                            fileType: 'image/webp' // Convert to WebP
+                        };
+                        
+                        let processedFile = file;
+                        try {
+                            processedFile = await imageCompression(file, options);
+                            // Rename to .webp if converted
+                            const newName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
+                            processedFile = new File([processedFile], newName, { type: 'image/webp' });
+                        } catch (e) {
+                            console.warn('Compression failed, falling back to original', e);
+                        }
+
+                        // Check size again just in case
+                        if (processedFile.size > 500 * 1024) {
+                             // If still too big (e.g. uncompressible), warn user
+                             if (!confirm(`图片压缩后仍大于 500KB (${(processedFile.size/1024).toFixed(0)}KB)，上传可能会失败。是否继续？`)) {
+                                 return;
+                             }
+                        }
+
+                        const formData = new FormData(); 
+                        formData.append('file', processedFile);
+                        formData.append('post_id', newPost.draftId);
+                        
+                        const res = await fetch(`${API_BASE}/upload`, { method: 'POST', headers: getSecurityHeaders('POST', null), body: formData });
+                        const data = await res.json();
+                        if (res.ok) {
+                            newPost.content += `![Image](${data.url})\n`;
+                        } else throw new Error(data.error);
+                    } catch (e) { 
+                        alert(e.message); 
+                    } finally { 
+                        uploading.value = false; 
+                    }
+                };
+
+                // TOTP Setup
+                const startTotpSetup = async () => {
+                    const res = await fetch(`${API_BASE}/user/totp/setup`, {
+                        method: 'POST', headers: getSecurityHeaders('POST'), body: JSON.stringify({})
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        totpSetup.secret = data.secret; totpSetup.uri = data.uri;
+                        nextTick(() => QRCode.toCanvas(document.getElementById('qrcode-canvas'), data.uri));
+                    }
+                };
+                const verifyTotpSetup = async () => {
+                    const res = await fetch(`${API_BASE}/user/totp/verify`, {
+                        method: 'POST', headers: getSecurityHeaders('POST'),
+                        body: JSON.stringify({ token: totpSetup.code })
+                    });
+                    if (res.ok) {
+                        alert('2FA 已启用！'); currentUser.value.totp_enabled = true;
+                        localStorage.setItem('user', JSON.stringify(currentUser.value));
+                        totpSetup.secret = ''; totpSetup.code = '';
+                    } else alert((await res.json()).error);
+                };
+
+                const formatDate = (dateString) => {
+                    if (!dateString) return '';
+                    // Append 'Z' to treat as UTC if it doesn't have timezone info, 
+                    // assuming backend stores as UTC without 'Z'
+                    const date = new Date(dateString.endsWith('Z') ? dateString : dateString + 'Z');
+                    return date.toLocaleString('zh-CN', { 
+                        year: 'numeric', 
+                        month: 'short', 
+                        day: 'numeric', 
+                        hour: '2-digit', 
+                        minute: '2-digit' 
+                    });
+                };
+
+                const fetchAdminData = async () => {
+                    if (!currentUser.value || currentUser.value.role !== 'admin') return;
+                    const [statsRes, usersRes] = await Promise.all([
+                        fetch(`${API_BASE}/admin/stats`, { headers: getSecurityHeaders() }), 
+                        fetch(`${API_BASE}/admin/users`, { headers: getSecurityHeaders() })
+                    ]);
+                    if (statsRes.ok) { const s = await statsRes.json(); adminStats.users = s.users; adminStats.posts = s.posts; adminStats.comments = s.comments; }
+                    if (usersRes.ok) adminUsers.value = await usersRes.json();
+                    fetchAdminCategories();
+                    fetchAdminSettings();
+                };
+
+                const fetchAdminSettings = async () => {
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/settings`, { headers: getSecurityHeaders() });
+                        if (res.ok) {
+                            const data = await res.json();
+                            systemSettings.turnstile_enabled = data.turnstile_enabled;
+                            systemSettings.notify_on_user_delete = data.notify_on_user_delete;
+                            systemSettings.notify_on_username_change = data.notify_on_username_change;
+                            systemSettings.notify_on_avatar_change = data.notify_on_avatar_change;
+                            systemSettings.notify_on_manual_verify = data.notify_on_manual_verify;
+                            turnstileConfig.enabled = data.turnstile_enabled; // Sync
+                        }
+                    } catch (e) { console.error(e); }
+                };
+
+                const fetchAdminCategories = async () => {
+                     try {
+                         const res = await fetch(`${API_BASE}/categories`);
+                         if (res.ok) adminCategories.value = await res.json();
+                     } catch (e) { console.error(e); }
+                };
+                
+                const saveCategory = async () => {
+                    if (!adminCategoryForm.name) return alert('名称不能为空');
+                    try {
+                        const url = adminCategoryForm.id ? `${API_BASE}/admin/categories/${adminCategoryForm.id}` : `${API_BASE}/admin/categories`;
+                        const method = adminCategoryForm.id ? 'PUT' : 'POST';
+                        
+                        const res = await fetch(url, {
+                            method,
+                            headers: getSecurityHeaders(method),
+                            body: JSON.stringify({ name: adminCategoryForm.name })
+                        });
+                        
+                        if (res.ok) {
+                            alert('保存成功');
+                            adminCategoryForm.id = null; adminCategoryForm.name = '';
+                            fetchAdminCategories();
+                            fetchCategories(); // Refresh public list too
+                        } else alert((await res.json()).error);
+                    } catch (e) { alert(e.message); }
+                };
+                
+                const deleteCategory = async (id) => {
+                    if (!confirm('确定要删除此分类吗？')) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/categories/${id}`, { method: 'DELETE', headers: getSecurityHeaders('DELETE') });
+                        if (res.ok) {
+                            fetchAdminCategories();
+                            fetchCategories();
+                        } else alert((await res.json()).error);
+                    } catch (e) { alert(e.message); }
+                };
+
+                const editCategory = (cat) => {
+                    adminCategoryForm.id = cat.id;
+                    adminCategoryForm.name = cat.name;
+                };
+                const deleteUser = async (id) => { if (confirm('确定要删除此用户吗？')) { await fetch(`${API_BASE}/admin/users/${id}`, { method: 'DELETE', headers: getSecurityHeaders('DELETE') }); fetchAdminData(); } };
+                const manualVerify = async (id) => { if (confirm('确认手动验证此用户？')) { await fetch(`${API_BASE}/admin/users/${id}/verify`, { method: 'POST', headers: getSecurityHeaders('POST') }); fetchAdminData(); } };
+                const resendEmail = async (id) => { if (confirm('重新发送验证邮件？')) { await fetch(`${API_BASE}/admin/users/${id}/resend`, { method: 'POST', headers: getSecurityHeaders('POST') }); alert('已发送'); } };
+                const adminDeletePost = async (id) => { 
+                    if (!confirm('确定要删除此帖子吗？')) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/posts/${id}`, { 
+                            method: 'DELETE', 
+                            headers: getSecurityHeaders('DELETE') 
+                        });
+                        if (res.ok) {
+                            posts.value = posts.value.filter(p => p.id !== id);
+                            if (totalPosts.value > 0) totalPosts.value--;
+                        } else {
+                            alert((await res.json()).error);
+                        }
+                    } catch (e) {
+                        alert(e.message);
+                    }
+                };
+                
+                const togglePin = async (post) => {
+                    if (!confirm(post.is_pinned ? '取消置顶此帖子？' : '置顶此帖子？')) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/posts/${post.id}/pin`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ pinned: !post.is_pinned })
+                        });
+                        if (res.ok) {
+                            post.is_pinned = !post.is_pinned ? 1 : 0;
+                            fetchPosts(); // Refresh order
+                        } else alert('操作失败');
+                    } catch (e) { alert(e.message); }
+                };
+
+                const movePost = async (post, categoryId) => {
+                    if (!confirm('确定移动此帖子吗？')) return;
+                    try {
+                        const res = await fetch(`${API_BASE}/admin/posts/${post.id}/move`, {
+                            method: 'POST',
+                            headers: getSecurityHeaders('POST'),
+                            body: JSON.stringify({ category_id: categoryId || null })
+                        });
+                        if (res.ok) {
+                            post.category_id = categoryId || null;
+                            const cat = categories.value.find(c => c.id == categoryId);
+                            post.category_name = cat ? cat.name : null;
+                            alert('移动成功');
+                        } else alert((await res.json()).error);
+                    } catch (e) { alert(e.message); }
+                };
+
+                const renderMarkdown = (text) => {
+                    if (!text) return '';
+                    // Escape HTML tags so they render as text
+                    const escaped = text
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#039;');
+                    
+                    // Configure DOMPurify to enforce alt text and wrap images in FancyBox link
+                    DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+                        if (node.tagName === 'IMG') {
+                            node.setAttribute('alt', '加载失败');
+                            
+                            // Wrap with anchor for FancyBox if not already wrapped
+                            // Check if parent is already an anchor to prevent double wrapping
+                            if (node.parentNode && node.parentNode.tagName !== 'A') {
+                                // We can't easily modify parent here in DOMPurify hook safely without breaking iteration
+                                // So we'll set a class or data attribute and handle it after sanitize, 
+                                // OR we can try to use a data-fancybox attribute on the img itself if FancyBox supports it?
+                                // FancyBox 5 typically needs an anchor wrapper <a href="img" data-fancybox>.
+                                // But DOMPurify sanitizes string. 
+                                // Let's try to manipulate the node by replacing it with a wrapper? 
+                                // No, replacing node in hook is risky.
+                                
+                                // Better approach: Add data-src to img and use FancyBox delegate?
+                                // FancyBox 5 can bind to any element.
+                                node.setAttribute('data-fancybox', 'gallery');
+                                node.setAttribute('data-src', node.getAttribute('src'));
+                                node.style.cursor = 'zoom-in';
+                            }
+                        }
+                    });
+
+                    return DOMPurify.sanitize(marked.parse(escaped));
+                };
+
+                // Initialize FancyBox
+                onMounted(() => {
+                    try {
+                        Fancybox.bind("[data-fancybox]", {
+                            // Your custom options
+                        });
+                    } catch (e) {
+                        console.error('FancyBox init failed', e);
+                    }
+                });
+
+                watch(view, (v) => { if (v === 'admin') fetchAdminData(); });
+
+                watch(showPostForm, (val) => {
+                    if (val && !isEditing.value) {
+                        nextTick(() => renderTurnstile('post-turnstile'));
+                    }
+                });
+
+                onMounted(async () => {
+                    // Start loading data immediately but don't block
+                    fetchConfig(); 
+                    fetchCategories(); 
+                    
+                    // Already parsed in setup()
+                    // const urlParams = new URLSearchParams(window.location.search);
+                    // const path = window.location.pathname;
+                    // const postMatch = path.match(/^\/posts\/(\d+)$/);
+                    
+                    // Prioritize Reset Token check (view already set in setup)
+                    if (view.value === 'reset') {
+                        // Render Turnstile for reset form
+                        nextTick(() => renderTurnstile('auth-turnstile'));
+                    }
+                    else if (urlParams.get('verified') === 'true') {
+                        verificationMessage.value = 'Email verified successfully!';
+                        window.history.replaceState({}, document.title, window.location.pathname);
+                        if (!currentUser.value) { showLoginForm(); }
+                    }
+                    else if (urlParams.get('email_changed') === 'true') {
+                        verificationMessage.value = 'Email changed successfully!';
+                        window.history.replaceState({}, document.title, window.location.pathname);
+                    }
+                    
+                    if (currentUser.value) {
+                        profileForm.username = currentUser.value.username;
+                        profileForm.avatar_url = currentUser.value.avatar_url || '';
+                        profileForm.email_notifications = currentUser.value.email_notifications !== false;
+                    }
+                        
+                    if (view.value === 'post' && postMatch) {
+                        fetchPost(postMatch[1]);
+                    } else {
+                        // If view is home or others, fetch posts
+                        if (view.value === 'home') fetchPosts();
+                    }
+                });
+
+                return {
+                    currentUser, showLogin, showRegister, showForgot, showReset, loading, loadingMore, uploading, error, verificationMessage,
+                    form, newPost, posts, view, adminStats, adminUsers, adminEdit, adminCategories, adminCategoryForm,
+                    categories, selectedCategory,
+                    totpRequired, totpSetup, emailChange,
+                    toggleAuthMode, handleLogin, handleRegister, handleForgot, handleReset, requestEmailChange,
+                    showForgotForm, showLoginForm, showRegisterForm,
+                    logout, createPost, deleteUser, deletePost, adminDeletePost, deleteComment, manualVerify, resendEmail,
+                    openAdminEdit, saveAdminEdit, togglePin, movePost, resetAvatar,
+                    saveCategory, deleteCategory, editCategory,
+                    analyzeCleanup, executeCleanup, cleanupStats, analyzing,
+                    goHome, fetchPost, openPost, currentPost,
+                    handleFileUpload, handlePaste, renderMarkdown, startTotpSetup, verifyTotpSetup,
+                    startEditPost, cancelEdit, isEditing, showPostForm,
+                    saveProfile, uploadAvatar, deleteAccount, profileForm, deleteAccountForm,
+                    toggleLike, toggleComments, postComment, startReply, cancelReply,
+                    turnstileConfig, systemSettings, saveSettings, formatDate,
+                    changePage, pageOffset, hasMore, pageLimit, fetchPosts, fetchCategories, totalUsers,
+                    totalPosts, jumpPage, goToPage
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
+

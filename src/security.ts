@@ -15,25 +15,52 @@ export class Security {
 
     constructor(env: any) {
         this.env = env;
-        // Prioritize env variable, fallback to a stronger secret (though env is recommended)
-        const secretStr = env.JWT_SECRET || 'a-very-long-random-string-that-is-much-more-secure-than-before-replace-with-env-var';
+        const secretStr = String(env.JWT_SECRET || '');
+        if (!secretStr || secretStr.length < 32) {
+            throw new Error('JWT_SECRET is not configured (must be at least 32 characters)');
+        }
         this.secret = new TextEncoder().encode(secretStr);
     }
 
     // 1. Generate JWT Token
-    async generateToken(user: UserPayload): Promise<string> {
-        return await new SignJWT({ ...user })
+    async generateToken(user: UserPayload): Promise<{ token: string; jti: string; expiresAt: number }> {
+        const jti = crypto.randomUUID();
+        const expiresAt = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+        const token = await new SignJWT({ ...user })
             .setProtectedHeader({ alg: 'HS256' })
+            .setJti(jti)
             .setIssuedAt()
             .setExpirationTime('24h') // 24 hours validity
             .sign(this.secret);
+        return { token, jti, expiresAt };
     }
 
     // 2. Verify JWT Token and return payload
     async verifyToken(token: string): Promise<UserPayload | null> {
         try {
             const { payload } = await jwtVerify(token, this.secret);
-            return payload as unknown as UserPayload;
+            const id = (payload as any)?.id;
+            const role = (payload as any)?.role;
+            const email = (payload as any)?.email;
+            const jti = (payload as any)?.jti;
+            if (typeof id !== 'number' || !Number.isFinite(id)) return null;
+            if (typeof role !== 'string' || !role) return null;
+            if (typeof email !== 'string' || !email) return null;
+            if (typeof jti !== 'string' || !jti) return null;
+
+            const session = await this.env.forum_db
+                .prepare('SELECT user_id, expires_at FROM sessions WHERE jti = ?')
+                .bind(jti)
+                .first();
+            if (!session) return null;
+            if (Number(session.user_id) !== id) return null;
+            if (Number(session.expires_at) <= Math.floor(Date.now() / 1000)) return null;
+
+            if (Math.random() < 0.01) {
+                await this.env.forum_db.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(Math.floor(Date.now() / 1000)).run();
+            }
+
+            return { id, role, email };
         } catch (e) {
             return null;
         }
