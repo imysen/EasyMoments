@@ -28,7 +28,7 @@
 		{
 			"binding": "forum_db",
 			"database_name": "forum-db",
-			"database_id": "e789efde-b66b-401b-8ad9-a13099357cb6",
+			"database_id": "your-database-id-here",
 			"remote": true,
 			"migrations_dir": "migrations"
 		}

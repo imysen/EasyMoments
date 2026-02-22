@@ -7,6 +7,7 @@ declare namespace Cloudflare {
 	}
 	interface Env {
 		forum_db: D1Database;
+		TURNSTILE_SECRET_KEY?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}

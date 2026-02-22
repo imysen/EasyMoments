@@ -70,11 +70,9 @@ function hasRestrictedKeywords(username: string): boolean {
 	return restricted.some(keyword => username.toLowerCase().includes(keyword.toLowerCase()));
 }
 
-const TURNSTILE_SECRET_KEY = '0x4AAAAAACOKzIrdFybmAD67qwlERVgvLMc';
-
-async function verifyTurnstile(token: string, ip: string): Promise<boolean> {
+async function verifyTurnstile(token: string, ip: string, secretKey: string): Promise<boolean> {
 	const formData = new FormData();
-	formData.append('secret', TURNSTILE_SECRET_KEY);
+	formData.append('secret', secretKey);
 	formData.append('response', token);
 	formData.append('remoteip', ip);
 
@@ -247,9 +245,10 @@ export default {
 		const checkTurnstile = async (reqBody: any, ip: string) => {
 			const setting = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first();
 			if (setting && setting.value === '1') {
+				if (!env.TURNSTILE_SECRET_KEY) return false;
 				const token = reqBody['cf-turnstile-response'];
 				if (!token) return false;
-				return await verifyTurnstile(token, ip);
+				return await verifyTurnstile(token, ip, env.TURNSTILE_SECRET_KEY);
 			}
 			return true;
 		};
@@ -595,9 +594,10 @@ export default {
 				const turnstileEnabled = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first();
 				
 				if (turnstileEnabled && turnstileEnabled.value === '1') {
+					if (!env.TURNSTILE_SECRET_KEY) return jsonResponse({ error: 'Turnstile not configured' }, 500);
 					const token = body['cf-turnstile-response'];
 					if (!token) return jsonResponse({ error: 'Turnstile verification failed (No Token)' }, 403);
-					const valid = await verifyTurnstile(token, ip);
+					const valid = await verifyTurnstile(token, ip, env.TURNSTILE_SECRET_KEY);
 					if (!valid) return jsonResponse({ error: 'Turnstile verification failed (Invalid Token)' }, 403);
 				}
 
@@ -643,9 +643,10 @@ export default {
 				const turnstileEnabled = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first();
 				
 				if (turnstileEnabled && turnstileEnabled.value === '1') {
+					if (!env.TURNSTILE_SECRET_KEY) return jsonResponse({ error: 'Turnstile not configured' }, 500);
 					const token = body['cf-turnstile-response'];
 					if (!token) return jsonResponse({ error: 'Turnstile verification failed (No Token)' }, 403);
-					const valid = await verifyTurnstile(token, ip);
+					const valid = await verifyTurnstile(token, ip, env.TURNSTILE_SECRET_KEY);
 					if (!valid) return jsonResponse({ error: 'Turnstile verification failed (Invalid Token)' }, 403);
 				}
 
